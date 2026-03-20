@@ -1,0 +1,18 @@
+{
+    "volume_filter": 0,
+    "bucket_tiers": [
+        2.5,
+        5.0,
+        7.5
+    ],
+    "limit_threshold": 9.5,
+    "indicator_strong": 3.0,
+    "indicator_super_strong": 7.5,
+    "continuity_threshold": 5.0,
+    "top_bottom_n": 100,
+    "refresh_interval": 60,
+    "high_price_threshold": 300,
+    "font_base": 22,
+    "chart_font_base": 15,
+    "chart_height_base": 600
+}

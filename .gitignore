@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+log/
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+.claude/
+*.zip
+config.py
