@@ -39,9 +39,29 @@ RAW_KEEP_DAYS = 2
 COMPUTED_KEEP_DAYS = 20
 LOG_KEEP_DAYS = 30
 
+
+def normalize_bucket_tiers(tiers):
+    """確保 bucket_tiers 為 3 個正數，失敗時回退預設值"""
+    default = [2.5, 5.0, 7.5]
+    if not isinstance(tiers, (list, tuple)):
+        return default
+
+    parsed = []
+    for value in tiers:
+        try:
+            fval = float(value)
+        except (TypeError, ValueError):
+            continue
+        if fval > 0:
+            parsed.append(fval)
+
+    if len(parsed) < 3:
+        return default
+    return sorted(parsed)[:3]
+
 # 從 settings.json 讀取的參數（初始值，會被 reload_settings() 更新）
 VOLUME_FILTER = SETTINGS.get('volume_filter', 0)
-BUCKET_TIERS = SETTINGS.get('bucket_tiers', [2.5, 5, 7.5])
+BUCKET_TIERS = normalize_bucket_tiers(SETTINGS.get('bucket_tiers', [2.5, 5, 7.5]))
 LIMIT_THRESHOLD = SETTINGS.get('limit_threshold', 9.5)
 INDICATOR_STRONG = SETTINGS.get('indicator_strong', 3)
 INDICATOR_SUPER_STRONG = SETTINGS.get('indicator_super_strong', 7.5)
@@ -70,7 +90,7 @@ def reload_settings(logger=None):
         with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
             s = json.load(f)
         VOLUME_FILTER = s.get('volume_filter', 0)
-        BUCKET_TIERS = s.get('bucket_tiers', [2.5, 5, 7.5])
+        BUCKET_TIERS = normalize_bucket_tiers(s.get('bucket_tiers', [2.5, 5, 7.5]))
         LIMIT_THRESHOLD = s.get('limit_threshold', 9.5)
         INDICATOR_STRONG = s.get('indicator_strong', 3)
         INDICATOR_SUPER_STRONG = s.get('indicator_super_strong', 7.5)
@@ -322,18 +342,25 @@ def cleanup_old_data(conn, logger):
 
 def cleanup_old_logs(logger):
     """清除超過 30 天的 Log 檔"""
-    cutoff = datetime.now() - timedelta(days=LOG_KEEP_DAYS)
+    cutoff_date = (datetime.now() - timedelta(days=LOG_KEEP_DAYS)).date()
     for f in os.listdir(LOG_DIR):
-        if not f.endswith('.log'):
-            continue
+        file_date = None
         try:
-            date_str = f.replace('.log', '')
-            file_date = datetime.strptime(date_str, '%Y-%m-%d')
-            if file_date < cutoff:
+            if f.endswith('.log'):
+                date_str = f[:-4]
+                file_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            elif '.log.' in f:
+                suffix = f.rsplit('.log.', 1)[1]
+                file_date = datetime.strptime(suffix, '%Y%m%d').date()
+        except ValueError:
+            file_date = None
+
+        if file_date and file_date < cutoff_date:
+            try:
                 os.remove(os.path.join(LOG_DIR, f))
                 logger.info(f"刪除舊 Log：{f}")
-        except ValueError:
-            pass
+            except OSError as e:
+                logger.warning(f"刪除舊 Log 失敗：{f} ({e})")
 
 
 # ============================================================

@@ -22,14 +22,119 @@ STOCK_NAMES_PATH = os.path.join(BASE_DIR, 'stock_names.json')
 
 # === 設定檔讀寫 ===
 
-def load_settings():
+SETTINGS_ERROR_KEY = "_settings_load_error"
+DEFAULT_SETTINGS = {
+    "volume_filter": 0,
+    "bucket_tiers": [2.5, 5.0, 7.5],
+    "flat_threshold": 1.0,
+    "limit_threshold": 9.5,
+    "indicator_strong": 3.0,
+    "indicator_super_strong": 7.5,
+    "continuity_threshold": 5.0,
+    "top_bottom_n": 100,
+    "refresh_interval": 60,
+    "high_price_threshold": 300,
+    "font_base": 16,
+    "chart_font_base": 10,
+    "chart_height_base": 340,
+}
+
+
+def _default_settings():
+    data = dict(DEFAULT_SETTINGS)
+    data["bucket_tiers"] = list(DEFAULT_SETTINGS["bucket_tiers"])
+    return data
+
+
+def _normalize_bucket_tiers(tiers):
+    defaults = list(DEFAULT_SETTINGS["bucket_tiers"])
+    if not isinstance(tiers, (list, tuple)):
+        return defaults
+
+    parsed = []
+    for value in tiers:
+        try:
+            fval = float(value)
+        except (TypeError, ValueError):
+            continue
+        if fval > 0:
+            parsed.append(fval)
+
+    if len(parsed) < 3:
+        return defaults
+
+    parsed = sorted(parsed)
+    return parsed[:3]
+
+
+def _to_int(value, default, min_value=None):
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        num = int(default)
+    if min_value is not None:
+        num = max(min_value, num)
+    return num
+
+
+def _to_float(value, default, min_value=None):
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        num = float(default)
+    if min_value is not None:
+        num = max(min_value, num)
+    return num
+
+
+def _normalize_settings(raw):
+    settings = _default_settings()
+    if isinstance(raw, dict):
+        settings.update(raw)
+
+    settings["volume_filter"] = _to_int(settings.get("volume_filter"), DEFAULT_SETTINGS["volume_filter"], min_value=0)
+    settings["bucket_tiers"] = _normalize_bucket_tiers(settings.get("bucket_tiers"))
+    settings["flat_threshold"] = _to_float(settings.get("flat_threshold"), DEFAULT_SETTINGS["flat_threshold"], min_value=0.1)
+    settings["limit_threshold"] = _to_float(settings.get("limit_threshold"), DEFAULT_SETTINGS["limit_threshold"])
+    settings["indicator_strong"] = _to_float(settings.get("indicator_strong"), DEFAULT_SETTINGS["indicator_strong"])
+    settings["indicator_super_strong"] = _to_float(settings.get("indicator_super_strong"), DEFAULT_SETTINGS["indicator_super_strong"])
+    settings["continuity_threshold"] = _to_float(settings.get("continuity_threshold"), DEFAULT_SETTINGS["continuity_threshold"])
+    settings["top_bottom_n"] = _to_int(settings.get("top_bottom_n"), DEFAULT_SETTINGS["top_bottom_n"], min_value=10)
+    settings["refresh_interval"] = _to_int(settings.get("refresh_interval"), DEFAULT_SETTINGS["refresh_interval"], min_value=15)
+    settings["high_price_threshold"] = _to_int(settings.get("high_price_threshold"), DEFAULT_SETTINGS["high_price_threshold"], min_value=50)
+    settings["font_base"] = _to_int(settings.get("font_base"), DEFAULT_SETTINGS["font_base"], min_value=10)
+    settings["chart_font_base"] = _to_int(settings.get("chart_font_base"), DEFAULT_SETTINGS["chart_font_base"], min_value=6)
+    settings["chart_height_base"] = _to_int(settings.get("chart_height_base"), DEFAULT_SETTINGS["chart_height_base"], min_value=250)
+    return settings
+
+
+@st.cache_data(ttl=30)
+def _read_settings_json():
     with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
         return json.load(f)
 
-def save_settings(data):
-    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
 
+def load_settings():
+    try:
+        raw = _read_settings_json()
+        if not isinstance(raw, dict):
+            raise ValueError("settings.json 內容不是物件格式")
+        settings = _normalize_settings(raw)
+        st.session_state.pop(SETTINGS_ERROR_KEY, None)
+        return settings
+    except Exception as e:
+        st.session_state[SETTINGS_ERROR_KEY] = f"{type(e).__name__}: {e}"
+        return _default_settings()
+
+def save_settings(data):
+    normalized = _normalize_settings(data)
+    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(normalized, f, ensure_ascii=False, indent=4)
+    _read_settings_json.clear()
+    st.session_state.pop(SETTINGS_ERROR_KEY, None)
+
+
+@st.cache_data(ttl=300)
 def load_csv_list(path):
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
@@ -38,6 +143,7 @@ def save_csv_list(path, items):
     with open(path, 'w', encoding='utf-8') as f:
         for item in items:
             f.write(item.strip() + '\n')
+    load_csv_list.clear()
 
 @st.cache_data(ttl=3600)
 def load_stock_names():
@@ -51,8 +157,6 @@ def load_stock_names():
 
 
 SETTINGS = load_settings()
-TSE_TOP20 = load_csv_list(TSE_TOP20_PATH)
-OTC_TOP20 = load_csv_list(OTC_TOP20_PATH)
 STOCK_NAMES = load_stock_names()
 
 # === Streamlit 設定 ===
@@ -335,7 +439,7 @@ def get_db_error():
     if not os.path.exists(DB_PATH):
         return f"資料庫檔案不存在：{DB_PATH}"
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn = sqlite3.connect(DB_PATH, timeout=15)
         conn.close()
     except sqlite3.Error as e:
         return f"無法開啟資料庫：{e}"
@@ -344,7 +448,7 @@ def get_db_error():
 
 def open_db():
     """統一用同一個路徑與 timeout 開啟 SQLite"""
-    return sqlite3.connect(DB_PATH, timeout=5)
+    return sqlite3.connect(DB_PATH, timeout=15)
 
 
 @st.cache_data(ttl=10)
@@ -407,6 +511,57 @@ def load_total_stock_count():
     finally:
         conn.close()
     return row[0] if row else 0
+
+
+@st.cache_data(ttl=300)
+def load_daily_stocks_latest_date():
+    """讀取 daily_stocks 最新交易日（YYYY-MM-DD）"""
+    conn = open_db()
+    try:
+        row = conn.execute("SELECT MAX(date) FROM daily_stocks").fetchone()
+    finally:
+        conn.close()
+    return row[0] if row and row[0] else None
+
+
+def _previous_business_day(ref_date):
+    day = ref_date
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def expected_daily_stocks_date(now):
+    """推估目前時間點應該至少同步到哪個交易日"""
+    market_close = now.replace(hour=13, minute=35, second=0, microsecond=0)
+    ref = now.date()
+
+    if now.weekday() >= 5:
+        ref -= timedelta(days=1)
+    elif now < market_close:
+        ref -= timedelta(days=1)
+
+    return _previous_business_day(ref)
+
+
+def get_daily_stocks_freshness_warning(now):
+    latest_date_str = load_daily_stocks_latest_date()
+    if not latest_date_str:
+        return "盤後資料（daily_stocks）尚未同步，前日強弱勢追蹤可能顯示 N/A。"
+
+    try:
+        latest_date = datetime.strptime(latest_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return f"盤後資料日期格式異常：{latest_date_str}，前日強弱勢追蹤可能失真。"
+
+    expected = expected_daily_stocks_date(now)
+    if latest_date < expected:
+        return (
+            f"盤後資料最新日為 {latest_date_str}，落後預期 {expected.isoformat()}；"
+            "前日強弱勢追蹤可能失真。"
+        )
+
+    return None
 
 
 def format_metric_value(value, decimals=2, suffix='', signed=False):
@@ -537,8 +692,14 @@ def load_volume_tide(date_str):
     if df.empty:
         return df
     df['net_flow'] = (df['up_value'] - df['down_value']) / 1e8
-    df['up_pct'] = df['up_value'] / df['total_value'].replace(0, float('nan')) * 100
-    df['down_pct'] = df['down_value'] / df['total_value'].replace(0, float('nan')) * 100
+    total_for_pct = pd.to_numeric(df['total_value'], errors='coerce')
+    zero_total_mask = total_for_pct.fillna(0) <= 0
+    total_for_pct = total_for_pct.mask(zero_total_mask)
+    df['up_pct'] = (pd.to_numeric(df['up_value'], errors='coerce') / total_for_pct) * 100
+    df['down_pct'] = (pd.to_numeric(df['down_value'], errors='coerce') / total_for_pct) * 100
+    # 無成交時段改以 0% 呈現，並保留標記供前端提示資料品質。
+    df['pct_imputed'] = zero_total_mask
+    df.loc[zero_total_mask, ['up_pct', 'down_pct']] = 0
     return df
 
 
@@ -556,9 +717,9 @@ def build_distribution_summary(snapshot_df, settings):
     if snapshot_df.empty or 'change_percent' not in snapshot_df.columns:
         return {'labels': [], 'counts': [], 'percents': [], 'colors': [], 'total': 0}
 
-    tiers = sorted(settings.get('bucket_tiers', [2.5, 5, 7.5]))
+    tiers = _normalize_bucket_tiers(settings.get('bucket_tiers'))
     t1, t2, t3 = tiers
-    flat_thr = 1.0
+    flat_thr = max(0.1, float(settings.get('flat_threshold', DEFAULT_SETTINGS['flat_threshold'])))
     p = pd.to_numeric(snapshot_df['change_percent'], errors='coerce').dropna()
     total = int(len(p))
     if total == 0:
@@ -849,8 +1010,17 @@ def build_trend_payload(history_df, date_str):
 
     # --- 趨勢圖用降採樣資料（每分鐘取最後一筆），減少瀏覽器渲染負擔 ---
     chart_df = history_df.copy()
-    chart_df['snapshot_time'] = pd.to_datetime(chart_df['snapshot_time'])
+    chart_df['snapshot_time'] = pd.to_datetime(chart_df['snapshot_time'], errors='coerce')
+    chart_df = chart_df.dropna(subset=['snapshot_time'])
+    if chart_df.empty:
+        payload['has_history'] = False
+        payload['data_error'] = "趨勢時間欄位含異常值，已略過無效資料。"
+        return payload
     chart_df = chart_df.set_index('snapshot_time').resample('1min').last().dropna(how='all').reset_index()
+    if chart_df.empty:
+        payload['has_history'] = False
+        payload['data_error'] = "趨勢資料降採樣後無有效資料。"
+        return payload
     chart_df['snapshot_time'] = chart_df['snapshot_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
     # --- 對 count 欄位做滾動平滑，避免折線圖突刺 ---
@@ -901,7 +1071,8 @@ def build_trend_payload(history_df, date_str):
     bar_df = chart_df.copy()
     if all(c in bar_df.columns for c in bucket_cols):
         # 降低資料密度：每 5 分鐘取一筆平均值，避免面積圖鋸齒
-        bar_df['snapshot_time'] = pd.to_datetime(bar_df['snapshot_time'])
+        bar_df['snapshot_time'] = pd.to_datetime(bar_df['snapshot_time'], errors='coerce')
+        bar_df = bar_df.dropna(subset=['snapshot_time'])
         bar_df = bar_df.set_index('snapshot_time')
         bar_df = bar_df[bucket_cols].resample('5min').mean().dropna().reset_index()
         # 滾動平滑柔化剩餘波動
@@ -972,59 +1143,67 @@ def build_trend_payload(history_df, date_str):
     vt_df = load_volume_tide(date_str)
     fig_vt_flow = None
     fig_vt_pct = None
+    vt_imputed_points = 0
     if not vt_df.empty:
+        if 'pct_imputed' in vt_df.columns:
+            vt_imputed_points = int(vt_df['pct_imputed'].sum())
+
         # 降採樣到每分鐘
         vt_chart = vt_df.copy()
-        vt_chart['snapshot_time'] = pd.to_datetime(vt_chart['snapshot_time'])
+        vt_chart['snapshot_time'] = pd.to_datetime(vt_chart['snapshot_time'], errors='coerce')
+        vt_chart = vt_chart.dropna(subset=['snapshot_time'])
         vt_chart = vt_chart.set_index('snapshot_time').resample('1min').last().dropna(how='all').reset_index()
-        vt_chart['snapshot_time'] = vt_chart['snapshot_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        if vt_chart.empty:
+            vt_imputed_points = 0
+        else:
+            vt_chart['snapshot_time'] = vt_chart['snapshot_time'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        cfb = st.session_state.get('chart_font_base', 10)
-        ht = st.session_state.get('chart_height_base', 340)
+            cfb = st.session_state.get('chart_font_base', 10)
+            ht = st.session_state.get('chart_height_base', 340)
 
-        # 量能淨流入長條圖
-        fig_vt_flow = go.Figure()
-        colors = ['#e74c3c' if v > 0 else '#27ae60' for v in vt_chart['net_flow']]
-        fig_vt_flow.add_trace(go.Bar(
-            x=vt_chart['snapshot_time'], y=vt_chart['net_flow'],
-            marker_color=colors, name='量能淨流入',
-            hovertemplate='%{x}<br>淨流入: %{y:+,.0f} 億<extra></extra>',
-        ))
-        fig_vt_flow.add_hline(y=0, line_color="#888", line_width=1)
-        add_time_markers(fig_vt_flow, date_str)
-        fig_vt_flow.update_layout(
-            title=dict(text="量能淨流入 趨勢（億）", font=dict(size=cfb+2), y=0.97, yanchor='top'),
-            height=ht, margin=dict(t=130, b=45, l=40, r=20),
-            yaxis=dict(title="淨流入（億）"),
-            xaxis=dict(tickfont=dict(size=cfb), tickangle=-45),
-            plot_bgcolor='white', hovermode='x unified',
-        )
+            # 量能淨流入長條圖
+            fig_vt_flow = go.Figure()
+            colors = ['#e74c3c' if v > 0 else '#27ae60' for v in vt_chart['net_flow']]
+            fig_vt_flow.add_trace(go.Bar(
+                x=vt_chart['snapshot_time'], y=vt_chart['net_flow'],
+                marker_color=colors, name='量能淨流入',
+                hovertemplate='%{x}<br>淨流入: %{y:+,.0f} 億<extra></extra>',
+            ))
+            fig_vt_flow.add_hline(y=0, line_color="#888", line_width=1)
+            add_time_markers(fig_vt_flow, date_str)
+            fig_vt_flow.update_layout(
+                title=dict(text="量能淨流入 趨勢（億）", font=dict(size=cfb+2), y=0.97, yanchor='top'),
+                height=ht, margin=dict(t=130, b=45, l=40, r=20),
+                yaxis=dict(title="淨流入（億）"),
+                xaxis=dict(tickfont=dict(size=cfb), tickangle=-45),
+                plot_bgcolor='white', hovermode='x unified',
+            )
 
-        # 多空量能佔比面積圖
-        fig_vt_pct = go.Figure()
-        fig_vt_pct.add_trace(go.Scatter(
-            x=vt_chart['snapshot_time'], y=vt_chart['up_pct'],
-            name='上漲股量能佔比', line=dict(color='#e74c3c', width=2),
-            fill='tozeroy', fillcolor='rgba(231,76,60,0.15)', mode='lines',
-            hovertemplate='上漲股: %{y:.1f}%<extra></extra>',
-        ))
-        fig_vt_pct.add_trace(go.Scatter(
-            x=vt_chart['snapshot_time'], y=vt_chart['down_pct'],
-            name='下跌股量能佔比', line=dict(color='#27ae60', width=2),
-            fill='tozeroy', fillcolor='rgba(39,174,96,0.15)', mode='lines',
-            hovertemplate='下跌股: %{y:.1f}%<extra></extra>',
-        ))
-        fig_vt_pct.add_hline(y=50, line_dash="dash", line_color="#888", line_width=1)
-        add_time_markers(fig_vt_pct, date_str)
-        fig_vt_pct.update_layout(
-            title=dict(text="多空量能佔比 趨勢", font=dict(size=cfb+2), y=0.97, yanchor='top'),
-            height=ht, margin=dict(t=130, b=45, l=40, r=20),
-            yaxis=dict(title="佔比（%）", range=[0, 100]),
-            xaxis=dict(tickfont=dict(size=cfb), tickangle=-45),
-            plot_bgcolor='white', hovermode='x unified',
-            legend=dict(orientation="h", yanchor="top", y=1.22,
-                        xanchor="center", x=0.5, font=dict(size=cfb)),
-        )
+            # 多空量能佔比面積圖
+            fig_vt_pct = go.Figure()
+            fig_vt_pct.add_trace(go.Scatter(
+                x=vt_chart['snapshot_time'], y=vt_chart['up_pct'],
+                name='上漲股量能佔比', line=dict(color='#e74c3c', width=2),
+                fill='tozeroy', fillcolor='rgba(231,76,60,0.15)', mode='lines',
+                hovertemplate='上漲股: %{y:.1f}%<extra></extra>',
+            ))
+            fig_vt_pct.add_trace(go.Scatter(
+                x=vt_chart['snapshot_time'], y=vt_chart['down_pct'],
+                name='下跌股量能佔比', line=dict(color='#27ae60', width=2),
+                fill='tozeroy', fillcolor='rgba(39,174,96,0.15)', mode='lines',
+                hovertemplate='下跌股: %{y:.1f}%<extra></extra>',
+            ))
+            fig_vt_pct.add_hline(y=50, line_dash="dash", line_color="#888", line_width=1)
+            add_time_markers(fig_vt_pct, date_str)
+            fig_vt_pct.update_layout(
+                title=dict(text="多空量能佔比 趨勢", font=dict(size=cfb+2), y=0.97, yanchor='top'),
+                height=ht, margin=dict(t=130, b=45, l=40, r=20),
+                yaxis=dict(title="佔比（%）", range=[0, 100]),
+                xaxis=dict(tickfont=dict(size=cfb), tickangle=-45),
+                plot_bgcolor='white', hovermode='x unified',
+                legend=dict(orientation="h", yanchor="top", y=1.22,
+                            xanchor="center", x=0.5, font=dict(size=cfb)),
+            )
 
     payload.update({
         'snapshot_time': latest.get('snapshot_time', ''),
@@ -1042,16 +1221,19 @@ def build_trend_payload(history_df, date_str):
         'fig_prev_weak': fig_prev_weak,
         'fig_vt_flow': fig_vt_flow,
         'fig_vt_pct': fig_vt_pct,
+        'vt_imputed_points': vt_imputed_points,
     })
     return payload
 
 
 def render_trend_section(payload, updating=False):
     st.markdown('<div class="section-hdr">📉 即時趨勢監控（當日變化）</div>', unsafe_allow_html=True)
-    render_key = f"{'updating' if updating else 'current'}-{payload.get('snapshot_time', 'na')}-{payload.get('history_len', 0)}"
+    key_prefix = "trend-updating" if updating else "trend"
 
     if updating and payload.get('snapshot_time'):
         st.caption(f"趨勢圖更新中，先顯示上一版資料（{payload['snapshot_time']}）。")
+    if payload.get('data_error'):
+        st.warning(payload['data_error'])
 
     if not payload.get('has_history'):
         st.markdown(
@@ -1075,33 +1257,35 @@ def render_trend_section(payload, updating=False):
 
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(payload['fig_strength'], width="stretch", key=f"trend-strength-{render_key}")
+        st.plotly_chart(payload['fig_strength'], width="stretch", key=f"{key_prefix}-strength")
     with c2:
-        st.plotly_chart(payload['fig_sentiment'], width="stretch", key=f"trend-sentiment-{render_key}")
+        st.plotly_chart(payload['fig_sentiment'], width="stretch", key=f"{key_prefix}-sentiment")
 
-    st.plotly_chart(payload['fig_bar'], width="stretch", key=f"trend-bar-{render_key}")
+    st.plotly_chart(payload['fig_bar'], width="stretch", key=f"{key_prefix}-bar")
 
     if 'fig_top' in payload and 'fig_bottom' in payload:
         tb1, tb2 = st.columns(2)
         with tb1:
-            st.plotly_chart(payload['fig_top'], width="stretch", key=f"trend-top-{render_key}")
+            st.plotly_chart(payload['fig_top'], width="stretch", key=f"{key_prefix}-top")
         with tb2:
-            st.plotly_chart(payload['fig_bottom'], width="stretch", key=f"trend-bottom-{render_key}")
+            st.plotly_chart(payload['fig_bottom'], width="stretch", key=f"{key_prefix}-bottom")
 
     if 'fig_prev_strong' in payload and 'fig_prev_weak' in payload:
         p1, p2 = st.columns(2)
         with p1:
-            st.plotly_chart(payload['fig_prev_strong'], width="stretch", key=f"trend-prev-strong-{render_key}")
+            st.plotly_chart(payload['fig_prev_strong'], width="stretch", key=f"{key_prefix}-prev-strong")
         with p2:
-            st.plotly_chart(payload['fig_prev_weak'], width="stretch", key=f"trend-prev-weak-{render_key}")
+            st.plotly_chart(payload['fig_prev_weak'], width="stretch", key=f"{key_prefix}-prev-weak")
 
     # --- 量能潮汐圖表（左右並列）---
     if payload.get('fig_vt_flow') and payload.get('fig_vt_pct'):
         v1, v2 = st.columns(2)
         with v1:
-            st.plotly_chart(payload['fig_vt_flow'], width="stretch", key=f"trend-vt-flow-{render_key}")
+            st.plotly_chart(payload['fig_vt_flow'], width="stretch", key=f"{key_prefix}-vt-flow")
         with v2:
-            st.plotly_chart(payload['fig_vt_pct'], width="stretch", key=f"trend-vt-pct-{render_key}")
+            st.plotly_chart(payload['fig_vt_pct'], width="stretch", key=f"{key_prefix}-vt-pct")
+        if payload.get('vt_imputed_points', 0) > 0:
+            st.caption(f"量能佔比含 {payload['vt_imputed_points']} 個無成交時段，該時段以 0% 呈現。")
 
 
 # ============================================================
@@ -1113,8 +1297,14 @@ def main():
     if db_error:
         st.warning(db_error)
         st.caption(f"資料庫路徑：{DB_PATH}")
-        st.info("請先執行 market-metadata/main.py 建立資料庫並寫入盤中快照。")
+        st.info("請先執行 /mnt/c/Users/User/Desktop/FB-Market/main.py 建立資料庫並寫入盤中快照。")
         st.stop()
+
+    settings_error = st.session_state.get(SETTINGS_ERROR_KEY)
+    if settings_error:
+        st.warning(f"settings.json 讀取失敗，已套用安全預設：{settings_error}")
+
+    settings = load_settings()
 
     toolbar_spacer, toolbar_btn = st.columns([15, 1])
     with toolbar_btn:
@@ -1123,7 +1313,7 @@ def main():
             st.stop()
 
     # 資料區塊（由 fragment 自動定時刷新，盤中 13:35 前生效）
-    _refresh_sec = load_settings().get('refresh_interval', 60)
+    _refresh_sec = settings.get('refresh_interval', DEFAULT_SETTINGS['refresh_interval'])
     now = datetime.now()
     market_close = now.replace(hour=13, minute=35, second=0, microsecond=0)
     run_every = timedelta(seconds=_refresh_sec) if now < market_close else None
@@ -1191,10 +1381,20 @@ def main():
     </style>
     <script>
     (function() {{
-      if (document.getElementById('fb-float-btn-inited')) return;
-      var tag = document.createElement('meta');
-      tag.id = 'fb-float-btn-inited';
-      document.head.appendChild(tag);
+      if (window._fbFloatInterval) {{
+        clearInterval(window._fbFloatInterval);
+        window._fbFloatInterval = null;
+      }}
+      if (window._fbFloatRefreshHandler) {{
+        window.removeEventListener('fb-fragment-refresh', window._fbFloatRefreshHandler);
+        window._fbFloatRefreshHandler = null;
+      }}
+      if (window._fbFloatPointerHandlers && window._fbFloatPointerHandlers.btn) {{
+        var old = window._fbFloatPointerHandlers;
+        old.btn.removeEventListener('pointerdown', old.down);
+        old.btn.removeEventListener('pointermove', old.move);
+        old.btn.removeEventListener('pointerup', old.up);
+      }}
 
       var REFRESH = {_refresh_sec};
       var IS_OPEN = {_is_market_open};
@@ -1228,19 +1428,21 @@ def main():
           cdWrap.style.display = 'none';
         }}
       }}
-      tick(); setInterval(tick, 1000);
+      tick();
+      window._fbFloatInterval = setInterval(tick, 1000);
 
       /* 監聽 fragment 刷新事件，歸零倒數 */
-      window.addEventListener('fb-fragment-refresh', function() {{
+      window._fbFloatRefreshHandler = function() {{
         countdownLeft = REFRESH;
-      }});
+      }};
+      window.addEventListener('fb-fragment-refresh', window._fbFloatRefreshHandler);
 
       /* --- 拖曳 + 點擊 --- */
       var dragging = false, didDrag = false;
       var sx, sy, sl, st2;
       var THRESHOLD = 5;
 
-      btn.addEventListener('pointerdown', function(e) {{
+      var onPointerDown = function(e) {{
         dragging = true; didDrag = false;
         sx = e.clientX; sy = e.clientY;
         var r = btn.getBoundingClientRect();
@@ -1248,8 +1450,8 @@ def main():
         btn.setPointerCapture(e.pointerId);
         circle.style.cursor = 'grabbing';
         e.preventDefault();
-      }});
-      btn.addEventListener('pointermove', function(e) {{
+      }};
+      var onPointerMove = function(e) {{
         if (!dragging) return;
         var dx = e.clientX - sx, dy = e.clientY - sy;
         if (Math.abs(dx) > THRESHOLD || Math.abs(dy) > THRESHOLD) didDrag = true;
@@ -1259,8 +1461,8 @@ def main():
           btn.style.right = 'auto'; btn.style.bottom = 'auto';
           btn.style.left = nl + 'px'; btn.style.top = nt + 'px';
         }}
-      }});
-      btn.addEventListener('pointerup', function(e) {{
+      }};
+      var onPointerUp = function(e) {{
         if (!dragging) return;
         dragging = false;
         circle.style.cursor = 'grab';
@@ -1272,7 +1474,13 @@ def main():
           btn.classList.toggle('expanded');
           adjustPanel();
         }}
-      }});
+      }};
+      btn.addEventListener('pointerdown', onPointerDown);
+      btn.addEventListener('pointermove', onPointerMove);
+      btn.addEventListener('pointerup', onPointerUp);
+      window._fbFloatPointerHandlers = {{
+        btn: btn, down: onPointerDown, move: onPointerMove, up: onPointerUp
+      }};
 
       /* --- 面板方向自適應 --- */
       function adjustPanel() {{
@@ -1297,6 +1505,7 @@ def main():
           btn.style.right = 'auto'; btn.style.bottom = 'auto';
         }}
       }} catch(x) {{}}
+      adjustPanel();
     }})();
     </script>
     """, unsafe_allow_javascript=True)
@@ -1308,8 +1517,9 @@ def main():
     st.fragment(trend_section, run_every=run_every)()
 
     # 指標定義說明（純文字，不需要隨資料刷新）
-    _settings = load_settings()
-    t1, t2, t3 = _settings.get('bucket_tiers', [2.5, 5, 7.5])
+    _settings = settings
+    t1, t2, t3 = _normalize_bucket_tiers(_settings.get('bucket_tiers'))
+    flat_thr = max(0.1, float(_settings.get('flat_threshold', DEFAULT_SETTINGS['flat_threshold'])))
     limit_thr = _settings.get('limit_threshold', 9.5)
     strong_thr = _settings.get('indicator_strong', 3)
     super_strong_thr = _settings.get('indicator_super_strong', 7.5)
@@ -1339,9 +1549,9 @@ def main():
         - 超強勢占比：`超強勢家數 / 多方股家數 × 100%`，超強勢：`漲跌幅% ≥ {super_strong_thr}`；多方股：`漲跌幅% ≥ {strong_thr}`。
         - 超弱勢占比：`超弱勢家數 / 空方股家數 × 100%`，超弱勢：`漲跌幅% ≤ -{super_strong_thr}`；空方股：`漲跌幅% ≤ -{strong_thr}`。
         - 近漲停：`漲跌幅% ≥ {limit_thr}`；近跌停：`漲跌幅% ≤ -{limit_thr}`。
-        - 持平區間：`-1% ~ +1%`。
-        - 漲幅區間：`1~{t1}%`, `{t1}~{t2}%`, `{t2}~{t3}%`, `>{t3}%`。
-        - 跌幅對稱區間：`-{t1}~-1%`, `-{t2}~-{t1}%`, `-{t3}~-{t2}%`, `<-{t3}%`。
+        - 持平區間：`-{flat_thr}% ~ +{flat_thr}%`。
+        - 漲幅區間：`{flat_thr}~{t1}%`, `{t1}~{t2}%`, `{t2}~{t3}%`, `>{t3}%`。
+        - 跌幅對稱區間：`-{t1}~-{flat_thr}%`, `-{t2}~-{t1}%`, `-{t3}~-{t2}%`, `<-{t3}%`。
         """,
         unsafe_allow_html=False,
     )
@@ -1391,6 +1601,7 @@ def data_section_upper():
     stime = stats.get('snapshot_time', '')
     date_str = stime[:10]
     filtered_total = stats.get('filtered_total', 0) or 0
+    freshness_warning = get_daily_stocks_freshness_warning(datetime.now())
     try:
         raw_total = load_total_stock_count()
         history_df = load_stats_history(date_str)
@@ -1406,6 +1617,8 @@ def data_section_upper():
         f"總資料來源 {raw_total:,} 檔股票 | 目前統計 {filtered_total:,} 檔 (≥{_vol_filter}張)</p>",
         unsafe_allow_html=True
     )
+    if freshness_warning:
+        st.warning(freshness_warning)
     # 通知浮動按鈕：fragment 已刷新，倒數歸零
     st.html("""<script>
     window.dispatchEvent(new CustomEvent('fb-fragment-refresh'));
@@ -1780,7 +1993,8 @@ def trend_section():
     """下半部：趨勢圖區（獨立 fragment，不擋上半部渲染）"""
     try:
         stats = load_latest_stats()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        st.error(f"趨勢資料載入失敗：{e}")
         return
 
     if not stats:
@@ -1790,7 +2004,8 @@ def trend_section():
     date_str = stime[:10]
     try:
         history_df = load_stats_history(date_str)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        st.error(f"趨勢資料載入失敗：{e}")
         return
 
     if len(history_df) <= 1:

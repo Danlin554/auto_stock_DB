@@ -1,8 +1,8 @@
 """
 盤後資料同步 - 從證交所/櫃買中心抓取每日收盤行情、三大法人、融資融券
 寫入 SQLite 的 daily_stocks 表
-執行方式：cd /mnt/c/Users/User/Desktop/FB-API && venv/bin/python market-metadata/postmarket_sync.py
-可帶參數指定日期：venv/bin/python market-metadata/postmarket_sync.py 2026-03-06
+執行方式：cd /mnt/c/Users/User/Desktop/FB-Market && venv/bin/python postmarket_sync.py
+可帶參數指定日期：venv/bin/python postmarket_sync.py 2026-03-06
 """
 import sys
 import os
@@ -21,6 +21,8 @@ LOG_DIR = os.path.join(BASE_DIR, 'log')
 # === 常數 ===
 REQUEST_DELAY = 3  # 每次 API 呼叫間隔（秒），避免被擋
 REQUEST_TIMEOUT = 20
+REQUEST_RETRIES = 3
+REQUEST_RETRY_BACKOFF = 2
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 DAILY_STOCKS_KEEP_DAYS = 120  # 保留 4 個月
 
@@ -64,14 +66,22 @@ def setup_logging():
 
 def fetch_json(url, logger):
     """發送 HTTP GET 請求，回傳 JSON"""
-    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-    try:
-        resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
-        raw = resp.read()
-        return json.loads(raw)
-    except Exception as e:
-        logger.error(f"HTTP 請求失敗: {url} → {e}")
-        raise
+    last_error = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+        try:
+            resp = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
+            raw = resp.read()
+            return json.loads(raw)
+        except Exception as e:
+            last_error = e
+            if attempt >= REQUEST_RETRIES:
+                logger.error(f"HTTP 請求失敗（最終）: {url} → {e}")
+                break
+            wait_sec = REQUEST_RETRY_BACKOFF ** (attempt - 1)
+            logger.warning(f"HTTP 請求失敗（{attempt}/{REQUEST_RETRIES}）: {url} → {e}，{wait_sec}s 後重試")
+            time.sleep(wait_sec)
+    raise last_error
 
 
 def parse_number(s):
