@@ -1,0 +1,25 @@
+# FB-Market 雲端部署依賴
+# 注意：fubon_neo 不在 PyPI，需手動提供 wheel 或從 venv 複製
+
+# 資料庫
+psycopg2-binary==2.9.10
+
+# Streamlit 儀表板
+streamlit==1.55.0
+
+# 資料處理
+pandas==2.3.3
+numpy==2.4.2
+pyarrow==23.0.1
+openpyxl==3.1.5
+
+# 圖表
+plotly==6.6.0
+
+# 工具
+requests==2.32.5
+orjson==3.11.7
+pytz==2026.1.post1
+
+# 富邦 SDK 依賴（fubon_neo 本身需手動安裝）
+fugle-marketdata==2.4.1
