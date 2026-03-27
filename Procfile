@@ -1,1 +1,1 @@
-worker: python -u zeabur_ip_test.py && sleep infinity
+web: python -m streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0 --server.fileWatcherType=none --server.headless=true
