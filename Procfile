@@ -1,1 +1,1 @@
-web: python zeabur_ip_test.py
+worker: python zeabur_ip_test.py && sleep infinity
