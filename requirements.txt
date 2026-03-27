@@ -1,2 +1,24 @@
-# IP 測試階段：zeabur_ip_test.py 只用 Python 標準庫，不需要額外套件
-# 正式部署時會補回完整依賴清單
+# FB-Market 雲端部署依賴
+
+# 資料庫
+psycopg2-binary==2.9.10
+
+# Streamlit 儀表板
+streamlit==1.45.1
+
+# 資料處理
+pandas==2.2.3
+numpy==1.26.4
+pyarrow==19.0.1
+openpyxl==3.1.5
+
+# 圖表
+plotly==5.24.1
+
+# 工具
+requests==2.32.3
+orjson==3.10.12
+pytz==2024.2
+
+# 富邦 SDK 依賴（fubon_neo 本身需手動安裝）
+fugle-marketdata==2.1.0

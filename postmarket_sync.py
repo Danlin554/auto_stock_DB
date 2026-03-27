@@ -1,21 +1,21 @@
 """
 盤後資料同步 - 從證交所/櫃買中心抓取每日收盤行情、三大法人、融資融券
-寫入 SQLite 的 daily_stocks 表
+寫入 PostgreSQL 的 daily_stocks 表
 執行方式：cd /mnt/c/Users/User/Desktop/FB-Market && venv/bin/python postmarket_sync.py
 可帶參數指定日期：venv/bin/python postmarket_sync.py 2026-03-06
 """
 import sys
 import os
 import time
-import sqlite3
 import json
 import logging
 import urllib.request
 from datetime import datetime, timedelta
 
+from lib.db import get_connection, init_all_tables, qexec, qmany
+
 # === 路徑設定 ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'data', 'market.db')
 LOG_DIR = os.path.join(BASE_DIR, 'log')
 
 # === 常數 ===
@@ -24,7 +24,7 @@ REQUEST_TIMEOUT = 20
 REQUEST_RETRIES = 3
 REQUEST_RETRY_BACKOFF = 2
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-DAILY_STOCKS_KEEP_DAYS = 120  # 保留 4 個月
+DAILY_STOCKS_KEEP_DAYS = 2200  # 保留約 6 年（供歷史指標回填使用）
 
 
 # ============================================================
@@ -120,59 +120,14 @@ def is_regular_stock(symbol):
 # ============================================================
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    # /mnt/c 下的 SQLite 搭配 WAL 容易出現 shared-memory/lock 問題。
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.execute("PRAGMA synchronous=NORMAL")
-
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS daily_stocks (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        date            TEXT NOT NULL,
-        market          TEXT NOT NULL,
-        symbol          TEXT NOT NULL,
-        name            TEXT,
-        -- OHLCV
-        open_price      REAL,
-        high_price      REAL,
-        low_price       REAL,
-        close_price     REAL,
-        trade_volume    INTEGER,
-        trade_value     REAL,
-        trade_count     INTEGER,
-        -- 三大法人買賣超（股數）
-        foreign_buy     INTEGER,
-        foreign_sell    INTEGER,
-        foreign_net     INTEGER,
-        trust_buy       INTEGER,
-        trust_sell      INTEGER,
-        trust_net       INTEGER,
-        dealer_net      INTEGER,
-        inst_total_net  INTEGER,
-        -- 融資融券（張數）
-        margin_buy      INTEGER,
-        margin_sell     INTEGER,
-        margin_redeem   INTEGER,
-        margin_balance  INTEGER,
-        short_sell      INTEGER,
-        short_buy       INTEGER,
-        short_redeem    INTEGER,
-        short_balance   INTEGER,
-        offset          INTEGER,
-        -- 唯一約束
-        UNIQUE(date, symbol)
-    );
-    CREATE INDEX IF NOT EXISTS idx_daily_stocks_date ON daily_stocks(date);
-    CREATE INDEX IF NOT EXISTS idx_daily_stocks_symbol ON daily_stocks(symbol);
-    """)
-    conn.commit()
+    conn = get_connection()
+    init_all_tables(conn)
     return conn
 
 
 def cleanup_old_daily(conn, logger):
     cutoff = (datetime.now() - timedelta(days=DAILY_STOCKS_KEEP_DAYS)).strftime('%Y-%m-%d')
-    cur = conn.execute("DELETE FROM daily_stocks WHERE date < ?", (cutoff,))
+    cur = qexec(conn, "DELETE FROM daily_stocks WHERE date < %s", (cutoff,))
     conn.commit()
     if cur.rowcount > 0:
         logger.info(f"清理舊 daily_stocks：{cur.rowcount} 筆")
@@ -494,7 +449,7 @@ def merge_and_write(conn, dt, ohlcv, institutional, margin, logger):
         ))
 
     # UPSERT：有衝突時更新全部欄位
-    conn.executemany("""
+    qmany(conn, """
         INSERT INTO daily_stocks (
             date, market, symbol, name,
             open_price, high_price, low_price, close_price,
@@ -505,23 +460,23 @@ def merge_and_write(conn, dt, ohlcv, institutional, margin, logger):
             margin_buy, margin_sell, margin_redeem, margin_balance,
             short_sell, short_buy, short_redeem, short_balance,
             offset
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(date, symbol) DO UPDATE SET
-            market=excluded.market, name=excluded.name,
-            open_price=excluded.open_price, high_price=excluded.high_price,
-            low_price=excluded.low_price, close_price=excluded.close_price,
-            trade_volume=excluded.trade_volume, trade_value=excluded.trade_value,
-            trade_count=excluded.trade_count,
-            foreign_buy=excluded.foreign_buy, foreign_sell=excluded.foreign_sell,
-            foreign_net=excluded.foreign_net,
-            trust_buy=excluded.trust_buy, trust_sell=excluded.trust_sell,
-            trust_net=excluded.trust_net,
-            dealer_net=excluded.dealer_net, inst_total_net=excluded.inst_total_net,
-            margin_buy=excluded.margin_buy, margin_sell=excluded.margin_sell,
-            margin_redeem=excluded.margin_redeem, margin_balance=excluded.margin_balance,
-            short_sell=excluded.short_sell, short_buy=excluded.short_buy,
-            short_redeem=excluded.short_redeem, short_balance=excluded.short_balance,
-            offset=excluded.offset
+            market=EXCLUDED.market, name=EXCLUDED.name,
+            open_price=EXCLUDED.open_price, high_price=EXCLUDED.high_price,
+            low_price=EXCLUDED.low_price, close_price=EXCLUDED.close_price,
+            trade_volume=EXCLUDED.trade_volume, trade_value=EXCLUDED.trade_value,
+            trade_count=EXCLUDED.trade_count,
+            foreign_buy=EXCLUDED.foreign_buy, foreign_sell=EXCLUDED.foreign_sell,
+            foreign_net=EXCLUDED.foreign_net,
+            trust_buy=EXCLUDED.trust_buy, trust_sell=EXCLUDED.trust_sell,
+            trust_net=EXCLUDED.trust_net,
+            dealer_net=EXCLUDED.dealer_net, inst_total_net=EXCLUDED.inst_total_net,
+            margin_buy=EXCLUDED.margin_buy, margin_sell=EXCLUDED.margin_sell,
+            margin_redeem=EXCLUDED.margin_redeem, margin_balance=EXCLUDED.margin_balance,
+            short_sell=EXCLUDED.short_sell, short_buy=EXCLUDED.short_buy,
+            short_redeem=EXCLUDED.short_redeem, short_balance=EXCLUDED.short_balance,
+            offset=EXCLUDED.offset
     """, rows)
     conn.commit()
 

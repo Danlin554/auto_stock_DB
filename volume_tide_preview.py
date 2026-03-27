@@ -3,13 +3,13 @@
 執行方式：cd /mnt/c/Users/User/Desktop/FB-Market && venv/bin/streamlit run volume_tide_preview.py
 """
 import os
-import sqlite3
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from lib.db import get_connection, read_sql, qone
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'data', 'market.db')
 
 TIME_MARKERS = [("09:00", "開盤"), ("09:30", "9:30"), ("10:00", "10:00"),
                 ("12:00", "12:00"), ("13:00", "13:00")]
@@ -30,10 +30,10 @@ st.set_page_config(page_title="量能指標預覽", layout="wide")
 st.markdown("<h2 style='text-align:center;'>量能指標預覽</h2>", unsafe_allow_html=True)
 
 # === 從 raw_snapshots 計算每個 snapshot_time 的上漲/下跌成交金額 ===
-conn = sqlite3.connect(DB_PATH, timeout=10)
-today = conn.execute("SELECT MAX(snapshot_time) FROM raw_snapshots").fetchone()[0][:10]
+conn = get_connection()
+today = qone(conn, "SELECT MAX(snapshot_time) FROM raw_snapshots")[0][:10]
 
-df = pd.read_sql_query("""
+df = read_sql("""
     SELECT
         snapshot_time,
         SUM(CASE WHEN change_percent > 0 THEN trade_value ELSE 0 END) AS up_value,
@@ -41,8 +41,8 @@ df = pd.read_sql_query("""
         SUM(CASE WHEN change_percent > 0 THEN trade_value ELSE 0 END)
           + SUM(CASE WHEN change_percent < 0 THEN trade_value ELSE 0 END) AS total_value
     FROM raw_snapshots
-    WHERE snapshot_time LIKE ?
-      AND LENGTH(symbol) = 4 AND symbol GLOB '[1-9][0-9][0-9][0-9]'
+    WHERE snapshot_time LIKE %s
+      AND LENGTH(symbol) = 4 AND symbol ~ '^[1-9][0-9]{3}$'
       AND change_percent IS NOT NULL AND is_anomaly = 0
     GROUP BY snapshot_time
     ORDER BY snapshot_time

@@ -3,16 +3,17 @@
 執行方式：cd /mnt/c/Users/User/Desktop/FB-Market && venv/bin/streamlit run dashboard.py
 """
 import os
-import sqlite3
 import json
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import streamlit as st
+import psycopg2
+
+from lib.db import get_connection, read_sql, qone
 
 # === 路徑設定 ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'data', 'market.db')
 SETTINGS_PATH = os.path.join(BASE_DIR, 'config', 'settings.json')
 BLUE_CHIPS_PATH = os.path.join(BASE_DIR, 'config', 'blue_chips.csv')
 TSE_TOP20_PATH = os.path.join(BASE_DIR, 'config', 'tse_top20.csv')
@@ -433,22 +434,17 @@ def settings_dialog():
 
 def get_db_error():
     """回傳目前資料庫不可用的原因；可用時回傳 None"""
-    db_dir = os.path.dirname(DB_PATH)
-    if not os.path.isdir(db_dir):
-        return f"資料庫資料夾不存在：{db_dir}"
-    if not os.path.exists(DB_PATH):
-        return f"資料庫檔案不存在：{DB_PATH}"
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=15)
+        conn = get_connection()
         conn.close()
-    except sqlite3.Error as e:
-        return f"無法開啟資料庫：{e}"
+    except Exception as e:
+        return f"無法連線資料庫：{e}"
     return None
 
 
 def open_db():
-    """統一用同一個路徑與 timeout 開啟 SQLite"""
-    return sqlite3.connect(DB_PATH, timeout=15)
+    """取得 PostgreSQL 連線"""
+    return get_connection()
 
 
 @st.cache_data(ttl=10)
@@ -456,19 +452,18 @@ def load_latest_stats():
     """最新統計（快取 10 秒，避免同一次頁面載入重複查詢）"""
     conn = open_db()
     try:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM computed_stats ORDER BY snapshot_time DESC LIMIT 1").fetchone()
+        df = read_sql("SELECT * FROM computed_stats ORDER BY snapshot_time DESC LIMIT 1", conn)
     finally:
         conn.close()
-    return dict(row) if row else None
+    return df.iloc[0].to_dict() if not df.empty else None
 
 @st.cache_data(ttl=10)
 def load_stats_history(date_str):
     """當日歷史（快取 10 秒）"""
     conn = open_db()
     try:
-        df = pd.read_sql_query(
-            "SELECT * FROM computed_stats WHERE snapshot_time LIKE ? ORDER BY snapshot_time",
+        df = read_sql(
+            "SELECT * FROM computed_stats WHERE snapshot_time LIKE %s ORDER BY snapshot_time",
             conn, params=(f"{date_str}%",)
         )
     finally:
@@ -480,16 +475,16 @@ def load_latest_snapshot(vol_filter=0):
     """最新快照（快取 10 秒，volume_filter 變動時自動刷新，依 symbol 去重）"""
     conn = open_db()
     try:
-        df = pd.read_sql_query("""
+        df = read_sql("""
             SELECT symbol, name, market, change_percent, close_price,
                    trade_volume, trade_value
             FROM raw_snapshots
             WHERE id IN (
                 SELECT MIN(id) FROM raw_snapshots
                 WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM raw_snapshots)
-                  AND LENGTH(symbol)=4 AND symbol GLOB '[1-9][0-9][0-9][0-9]'
+                  AND LENGTH(symbol)=4 AND symbol ~ '^[1-9][0-9]{3}$'
                   AND change_percent IS NOT NULL AND is_anomaly = 0
-                  AND trade_volume >= ?
+                  AND trade_volume >= %s
                 GROUP BY symbol
             )
         """, conn, params=(vol_filter,))
@@ -502,12 +497,12 @@ def load_total_stock_count():
     """原始總股票數（不套成交量濾網，依 symbol 去重，快取 10 秒）"""
     conn = open_db()
     try:
-        row = conn.execute("""
+        row = qone(conn, """
             SELECT COUNT(DISTINCT symbol) FROM raw_snapshots
             WHERE snapshot_time = (SELECT MAX(snapshot_time) FROM raw_snapshots)
-              AND LENGTH(symbol)=4 AND symbol GLOB '[1-9][0-9][0-9][0-9]'
+              AND LENGTH(symbol)=4 AND symbol ~ '^[1-9][0-9]{3}$'
               AND change_percent IS NOT NULL AND is_anomaly = 0
-        """).fetchone()
+        """)
     finally:
         conn.close()
     return row[0] if row else 0
@@ -518,7 +513,7 @@ def load_daily_stocks_latest_date():
     """讀取 daily_stocks 最新交易日（YYYY-MM-DD）"""
     conn = open_db()
     try:
-        row = conn.execute("SELECT MAX(date) FROM daily_stocks").fetchone()
+        row = qone(conn, "SELECT MAX(date) FROM daily_stocks")
     finally:
         conn.close()
     return row[0] if row and row[0] else None
@@ -670,36 +665,23 @@ def get_arrow(current, previous):
 # === 量能指標載入 ===
 @st.cache_data(ttl=10)
 def load_volume_tide(date_str):
-    """從 raw_snapshots 計算每個 snapshot_time 的上漲/下跌成交金額"""
+    """從 computed_stats 讀取預先計算好的量能潮汐（不再掃 raw_snapshots）"""
     conn = open_db()
     try:
-        df = pd.read_sql_query("""
-            SELECT
-                snapshot_time,
-                SUM(CASE WHEN change_percent > 0 THEN trade_value ELSE 0 END) AS up_value,
-                SUM(CASE WHEN change_percent < 0 THEN trade_value ELSE 0 END) AS down_value,
-                SUM(CASE WHEN change_percent > 0 THEN trade_value ELSE 0 END)
-                  + SUM(CASE WHEN change_percent < 0 THEN trade_value ELSE 0 END) AS total_value
-            FROM raw_snapshots
-            WHERE snapshot_time LIKE ?
-              AND LENGTH(symbol) = 4 AND symbol GLOB '[1-9][0-9][0-9][0-9]'
-              AND change_percent IS NOT NULL AND is_anomaly = 0
-            GROUP BY snapshot_time
+        df = read_sql("""
+            SELECT snapshot_time,
+                   volume_tide_up_value  AS up_value,
+                   volume_tide_down_value AS down_value,
+                   volume_tide_net       AS net_flow,
+                   volume_tide_up_pct    AS up_pct,
+                   volume_tide_down_pct  AS down_pct
+            FROM computed_stats
+            WHERE snapshot_time LIKE %s
+              AND volume_tide_net IS NOT NULL
             ORDER BY snapshot_time
         """, conn, params=(f"{date_str}%",))
     finally:
         conn.close()
-    if df.empty:
-        return df
-    df['net_flow'] = (df['up_value'] - df['down_value']) / 1e8
-    total_for_pct = pd.to_numeric(df['total_value'], errors='coerce')
-    zero_total_mask = total_for_pct.fillna(0) <= 0
-    total_for_pct = total_for_pct.mask(zero_total_mask)
-    df['up_pct'] = (pd.to_numeric(df['up_value'], errors='coerce') / total_for_pct) * 100
-    df['down_pct'] = (pd.to_numeric(df['down_value'], errors='coerce') / total_for_pct) * 100
-    # 無成交時段改以 0% 呈現，並保留標記供前端提示資料品質。
-    df['pct_imputed'] = zero_total_mask
-    df.loc[zero_total_mask, ['up_pct', 'down_pct']] = 0
     return df
 
 
@@ -953,8 +935,9 @@ def make_diverging_bar(df):
     """多空家數強弱勢統計分布圖 — 正負堆疊面積圖（消除薄柱突刺）"""
     cfb = st.session_state.get('chart_font_base', 10)
     fig = go.Figure()
-    # 漲方（正方向堆疊面積）— 由外層到內層依序加入
+    # 漲方（正方向堆疊面積）— 由內層到外層依序加入（最淡在最底）
     for col, name, color, fill_color in [
+        ('bucket_up_2_5',  '漲 0~2.5%',  '#fee090', 'rgba(254,224,144,0.7)'),
         ('bucket_up_5',    '漲 2.5~5%',  '#fdae61', 'rgba(253,174,97,0.7)'),
         ('bucket_up_7_5',  '漲 5~7.5%',  '#f46d43', 'rgba(244,109,67,0.7)'),
         ('bucket_up_above','漲 >7.5%',   '#d73027', 'rgba(215,48,39,0.7)'),
@@ -968,6 +951,7 @@ def make_diverging_bar(df):
                 hovertemplate=f'{name}: %{{y:.0f}}<extra></extra>'))
     # 跌方（負方向堆疊面積）
     for col, name, color, fill_color in [
+        ('bucket_down_2_5',  '跌 0~2.5%',  '#d9ef8b', 'rgba(217,239,139,0.7)'),
         ('bucket_down_5',    '跌 2.5~5%',  '#a6d96a', 'rgba(166,217,106,0.7)'),
         ('bucket_down_7_5',  '跌 5~7.5%',  '#66bd63', 'rgba(102,189,99,0.7)'),
         ('bucket_down_above','跌 >7.5%',   '#1a9850', 'rgba(26,152,80,0.7)'),
@@ -986,7 +970,7 @@ def make_diverging_bar(df):
         margin=dict(t=140, b=45, l=40, r=20),
         hovermode='x unified',
         xaxis=dict(tickfont=dict(size=cfb), tickangle=-45),
-        yaxis=dict(title="家數", zeroline=True, zerolinecolor='#888', zerolinewidth=1),
+        yaxis=dict(title="家數", zeroline=True, zerolinecolor='#888', zerolinewidth=1, dtick=200),
         legend=dict(orientation="h", yanchor="top", y=1.22,
                     xanchor="center", x=0.5, font=dict(size=cfb)),
         plot_bgcolor='white',
@@ -1049,14 +1033,6 @@ def build_trend_payload(history_df, date_str):
         "多空情緒綜合指標趨勢",
         "情緒指數",
     )
-    if 'strength_index' in chart_df.columns:
-        fig_sentiment.add_trace(go.Scatter(
-            x=chart_df['snapshot_time'], y=chart_df['strength_index'],
-            name='<span style="color:#e74c3c">強弱勢漲跌幅指數</span>',
-            line=dict(color='#e74c3c', width=2),
-            mode='lines', yaxis='y2',
-            hovertemplate='強弱勢漲跌幅指數: %{y:.2f}%<extra></extra>'))
-        fig_sentiment.update_layout(yaxis2=dict(title='強弱指數 / 活躍度(%)', overlaying='y', side='right'))
     if 'activity_rate' in chart_df.columns:
         fig_sentiment.add_trace(go.Scatter(
             x=chart_df['snapshot_time'], y=chart_df['activity_rate'],
@@ -1064,37 +1040,46 @@ def build_trend_payload(history_df, date_str):
             line=dict(color='#e67e22', width=2, dash='dot'),
             mode='lines', yaxis='y2',
             hovertemplate='多空活躍度: %{y:.2f}%<extra></extra>'))
+        fig_sentiment.update_layout(
+            yaxis=dict(title="情緒指數", title_font=dict(color='#3498db'), tickfont=dict(color='#3498db')),
+            yaxis2=dict(title='活躍度(%)', overlaying='y', side='right',
+                        title_font=dict(color='#e67e22'), tickfont=dict(color='#e67e22')),
+        )
 
-    # --- 異常值偵測 + 限幅 + 滾動平滑（僅供分布圖使用）---
-    bucket_cols = ['bucket_up_5', 'bucket_up_7_5', 'bucket_up_above',
-                   'bucket_down_5', 'bucket_down_7_5', 'bucket_down_above']
-    bar_df = chart_df.copy()
-    if all(c in bar_df.columns for c in bucket_cols):
-        # 降低資料密度：每 5 分鐘取一筆平均值，避免面積圖鋸齒
-        bar_df['snapshot_time'] = pd.to_datetime(bar_df['snapshot_time'], errors='coerce')
-        bar_df = bar_df.dropna(subset=['snapshot_time'])
-        bar_df = bar_df.set_index('snapshot_time')
-        bar_df = bar_df[bucket_cols].resample('5min').mean().dropna().reset_index()
-        # 滾動平滑柔化剩餘波動
-        for col in bucket_cols:
-            bar_df[col] = bar_df[col].rolling(window=3, center=True, min_periods=1).mean()
-
-    # --- 強勢百 / 弱勢百 分開兩張圖 ---
-    fig_top = make_timeline(
-        chart_df,
-        ['top_n_avg'],
-        ['強勢百均漲幅'],
-        ['#e74c3c'],
-        "強勢百 均漲幅趨勢",
-        "漲跌幅(%)",
-    )
-    fig_bottom = make_timeline(
-        chart_df,
-        ['bottom_n_avg'],
-        ['弱勢百均跌幅'],
-        ['#27ae60'],
-        "弱勢百 均跌幅趨勢",
-        "漲跌幅(%)",
+    # --- 強勢百 / 弱勢百 + 強弱勢漲跌幅指數（合為一張圖）---
+    _cfb = st.session_state.get('chart_font_base', 10)
+    _ht = st.session_state.get('chart_height_base', 340)
+    fig_topbot = go.Figure()
+    if 'top_n_avg' in chart_df.columns:
+        fig_topbot.add_trace(go.Scatter(
+            x=chart_df['snapshot_time'], y=chart_df['top_n_avg'],
+            name='<span style="color:#e74c3c">強勢百均漲幅</span>',
+            line=dict(color='#e74c3c', width=2),
+            mode='lines',
+            hovertemplate='強勢百均漲幅: %{y:.2f}%<extra></extra>'))
+    if 'bottom_n_avg' in chart_df.columns:
+        fig_topbot.add_trace(go.Scatter(
+            x=chart_df['snapshot_time'], y=chart_df['bottom_n_avg'],
+            name='<span style="color:#27ae60">弱勢百均跌幅</span>',
+            line=dict(color='#27ae60', width=2),
+            mode='lines',
+            hovertemplate='弱勢百均跌幅: %{y:.2f}%<extra></extra>'))
+    if 'strength_index' in chart_df.columns:
+        fig_topbot.add_trace(go.Scatter(
+            x=chart_df['snapshot_time'], y=chart_df['strength_index'],
+            name='<span style="color:#d4a017">強弱勢漲跌幅指數</span>',
+            line=dict(color='#d4a017', width=3, dash='dash'),
+            mode='lines',
+            hovertemplate='強弱勢漲跌幅指數: %{y:.2f}%<extra></extra>'))
+    fig_topbot.update_layout(
+        title=dict(text="強弱勢平均漲跌幅指數", font=dict(size=_cfb + 2), y=0.98, yanchor='top'),
+        height=_ht + 60,
+        margin=dict(t=140, b=45, l=40, r=20),
+        hovermode='x unified',
+        xaxis=dict(tickfont=dict(size=_cfb), tickangle=-45),
+        yaxis=dict(title="漲跌幅(%)"),
+        legend=dict(orientation="h", yanchor="top", y=1.22, xanchor="center", x=0.5, font=dict(size=_cfb)),
+        plot_bgcolor='white',
     )
 
     # --- 新增圖表：前日強勢股追蹤（雙軸）---
@@ -1113,7 +1098,11 @@ def build_trend_payload(history_df, date_str):
             line=dict(color='#3498db', width=2, dash='dot'),
             mode='lines', yaxis='y2',
             hovertemplate='正報酬率家數: %{y:.1f}%<extra></extra>'))
-        fig_prev_strong.update_layout(yaxis2=dict(title='報酬率(%)', overlaying='y', side='right'))
+        fig_prev_strong.update_layout(
+            yaxis=dict(title_font=dict(color='#e74c3c'), tickfont=dict(color='#e74c3c')),
+            yaxis2=dict(title='報酬率(%)', overlaying='y', side='right',
+                        title_font=dict(color='#3498db'), tickfont=dict(color='#3498db')),
+        )
 
     # --- 新增圖表：前日弱勢股追蹤（雙軸）---
     fig_prev_weak = make_timeline(
@@ -1131,13 +1120,15 @@ def build_trend_payload(history_df, date_str):
             line=dict(color='#e67e22', width=2, dash='dot'),
             mode='lines', yaxis='y2',
             hovertemplate='負報酬率家數: %{y:.1f}%<extra></extra>'))
-        fig_prev_weak.update_layout(yaxis2=dict(title='報酬率(%)', overlaying='y', side='right'))
+        fig_prev_weak.update_layout(
+            yaxis=dict(title_font=dict(color='#27ae60'), tickfont=dict(color='#27ae60')),
+            yaxis2=dict(title='報酬率(%)', overlaying='y', side='right',
+                        title_font=dict(color='#e67e22'), tickfont=dict(color='#e67e22')),
+        )
 
     # --- 所有圖表加上時間標記 ---
-    for fig in [fig_strength, fig_sentiment, fig_top, fig_bottom, fig_prev_strong, fig_prev_weak]:
+    for fig in [fig_strength, fig_sentiment, fig_topbot, fig_prev_strong, fig_prev_weak]:
         add_time_markers(fig, date_str)
-    fig_bar = make_diverging_bar(bar_df)
-    add_time_markers(fig_bar, date_str)
 
     # --- 量能潮汐圖表 ---
     vt_df = load_volume_tide(date_str)
@@ -1214,9 +1205,7 @@ def build_trend_payload(history_df, date_str):
         'sc2': "red" if sen_d > 0 else "green",
         'fig_strength': fig_strength,
         'fig_sentiment': fig_sentiment,
-        'fig_bar': fig_bar,
-        'fig_top': fig_top,
-        'fig_bottom': fig_bottom,
+        'fig_topbot': fig_topbot,
         'fig_prev_strong': fig_prev_strong,
         'fig_prev_weak': fig_prev_weak,
         'fig_vt_flow': fig_vt_flow,
@@ -1261,14 +1250,8 @@ def render_trend_section(payload, updating=False):
     with c2:
         st.plotly_chart(payload['fig_sentiment'], width="stretch", key=f"{key_prefix}-sentiment")
 
-    st.plotly_chart(payload['fig_bar'], width="stretch", key=f"{key_prefix}-bar")
-
-    if 'fig_top' in payload and 'fig_bottom' in payload:
-        tb1, tb2 = st.columns(2)
-        with tb1:
-            st.plotly_chart(payload['fig_top'], width="stretch", key=f"{key_prefix}-top")
-        with tb2:
-            st.plotly_chart(payload['fig_bottom'], width="stretch", key=f"{key_prefix}-bottom")
+    if 'fig_topbot' in payload:
+        st.plotly_chart(payload['fig_topbot'], width="stretch", key=f"{key_prefix}-topbot")
 
     if 'fig_prev_strong' in payload and 'fig_prev_weak' in payload:
         p1, p2 = st.columns(2)
@@ -1287,6 +1270,15 @@ def render_trend_section(payload, updating=False):
         if payload.get('vt_imputed_points', 0) > 0:
             st.caption(f"量能佔比含 {payload['vt_imputed_points']} 個無成交時段，該時段以 0% 呈現。")
 
+    # --- VIX 指標（待實作：台灣 VIX 資料來源確認中）---
+    st.markdown(
+        '<div class="panel" style="border:1px dashed #aaa; background:#f9f9f9; padding:16px; margin:8px 0;">'
+        '<div style="font-weight:600; color:#888; margin-bottom:6px;">📌 VIX 波動率指標</div>'
+        '<div style="color:#aaa; font-size:13px;">🚧 待辦：台灣 VIX（TVIX）資料來源確認中，功能尚未實作。</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
 
 # ============================================================
 #  主頁面
@@ -1296,7 +1288,7 @@ def main():
     db_error = get_db_error()
     if db_error:
         st.warning(db_error)
-        st.caption(f"資料庫路徑：{DB_PATH}")
+        st.caption("請確認 DATABASE_URL 環境變數已設定，且 PostgreSQL 服務正常運行。")
         st.info("請先執行 /mnt/c/Users/User/Desktop/FB-Market/main.py 建立資料庫並寫入盤中快照。")
         st.stop()
 
@@ -1569,9 +1561,9 @@ def data_section_upper():
     try:
         stats = load_latest_stats()
         snapshot_df = load_latest_snapshot(_vol_filter)
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         st.error(f"讀取市場資料庫失敗：{e}")
-        st.caption(f"資料庫路徑：{DB_PATH}")
+        st.caption("請確認 DATABASE_URL 環境變數已設定，且 PostgreSQL 服務正常運行。")
         return
 
     if not stats:
@@ -1605,9 +1597,9 @@ def data_section_upper():
     try:
         raw_total = load_total_stock_count()
         history_df = load_stats_history(date_str)
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         st.error(f"讀取市場資料庫失敗：{e}")
-        st.caption(f"資料庫路徑：{DB_PATH}")
+        st.caption("請確認 DATABASE_URL 環境變數已設定，且 PostgreSQL 服務正常運行。")
         return
 
     st.markdown(
@@ -1642,8 +1634,8 @@ def data_section_upper():
     # === 取前一筆做箭頭比對 ===
     prev_row = history_df.iloc[-2] if len(history_df) >= 2 else None
 
-    # ===== 第一排：3面板 =====
-    p1, p2, p3 = st.columns([3.2, 3.0, 4.0])
+    # ===== 第一排：2面板 =====
+    p1, p2 = st.columns([1, 1])
 
     # --- 面板1: 市場數據總覽（全部指標）---
     with p1:
@@ -1662,6 +1654,15 @@ def data_section_upper():
         prev_weak_rate = stats.get('prev_weak_negative_rate')
         summary_prev_rate_range = format_range_text(history_df, 'prev_strong_positive_rate', decimals=2, suffix='%')
         summary_prev_weak_rate_range = format_range_text(history_df, 'prev_weak_negative_rate', decimals=2, suffix='%')
+        # 前日強弱勢股的資料日期
+        _daily_date_str = load_daily_stocks_latest_date()
+        _daily_date_label = ""
+        if _daily_date_str:
+            try:
+                _dd = datetime.strptime(_daily_date_str, "%Y-%m-%d")
+                _daily_date_label = f"({_dd.month}/{_dd.day})"
+            except ValueError:
+                pass
 
         s_c = "red" if sentiment > 0 else "green" if sentiment < 0 else "gray"
         ad_c = "red" if ad is not None and ad > 1 else "green" if ad is not None and ad < 1 else "gray"
@@ -1775,7 +1776,7 @@ def data_section_upper():
             '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
             metric_box_html(
                 format_metric_value(prev_count, decimals=0),
-                "前日強勢股",
+                f"前日強勢股{_daily_date_label}",
                 "",
                 num_class="metric-num",
                 color_class="gray",
@@ -1799,7 +1800,7 @@ def data_section_upper():
             '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
             metric_box_html(
                 format_metric_value(prev_weak_count, decimals=0),
-                "前日弱勢股",
+                f"前日弱勢股{_daily_date_label}",
                 "",
                 num_class="metric-num",
                 color_class="gray",
@@ -1834,8 +1835,15 @@ def data_section_upper():
             unsafe_allow_html=True,
         )
 
-    # --- 面板2: 極端值監控（含漲跌停）---
+    # --- 面板2: 市場家數統計監控 ---
     with p2:
+        uc = stats.get('up_count', 0) or 0
+        dc = stats.get('down_count', 0) or 0
+        fc = stats.get('flat_count', 0) or 0
+        rk = stats.get('red_k_count', 0) or 0
+        bk = stats.get('black_k_count', 0) or 0
+        fk = stats.get('flat_k_count', 0) or 0
+        rk_diff = rk - bk
         ss = stats.get('super_strong_count', 0) or 0
         sw = stats.get('super_weak_count', 0) or 0
         sc = stats.get('strong_count', 0) or 0
@@ -1847,7 +1855,64 @@ def data_section_upper():
         super_strong_thr = _settings.get('indicator_super_strong', 7.5)
         ss_p = f"{ss/sc*100:.0f}%" if sc > 0 else "N/A"
         sw_p = f"{sw/wc*100:.0f}%" if wc > 0 else "N/A"
+        rk_diff_color = "#e74c3c" if rk_diff > 0 else "#27ae60" if rk_diff < 0 else "#888"
         extreme_html = "".join([
+            # 上漲 / 平盤 / 下跌
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-bottom:4px;">',
+            metric_box_html(
+                format_metric_value(uc, decimals=0),
+                "上漲家數",
+                format_range_text(history_df, 'up_count', decimals=0),
+                num_class="metric-num",
+                color_class="red",
+            ),
+            metric_box_html(
+                format_metric_value(fc, decimals=0),
+                "平盤家數",
+                format_range_text(history_df, 'flat_count', decimals=0),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(dc, decimals=0),
+                "下跌家數",
+                format_range_text(history_df, 'down_count', decimals=0),
+                num_class="metric-num",
+                color_class="green",
+            ),
+            '</div>',
+            # 紅K / 無漲跌K / 黑K / 差值
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:4px; margin-bottom:4px;">',
+            metric_box_html(
+                format_metric_value(rk, decimals=0),
+                "紅K家數",
+                format_range_text(history_df, 'red_k_count', decimals=0),
+                num_class="metric-num",
+                color_class="red",
+            ),
+            metric_box_html(
+                format_metric_value(fk, decimals=0),
+                "無漲跌K",
+                format_range_text(history_df, 'flat_k_count', decimals=0),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(bk, decimals=0),
+                "黑K家數",
+                format_range_text(history_df, 'black_k_count', decimals=0),
+                num_class="metric-num",
+                color_class="green",
+            ),
+            metric_box_html(
+                f"{rk_diff:+d}" if rk_diff != 0 else "0",
+                "紅黑K差",
+                "",
+                num_class="metric-num",
+                style=f"color:{rk_diff_color};",
+            ),
+            '</div>',
+            # 極端值（原有）
             '<div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">',
             metric_box_html(
                 format_metric_value(ss, decimals=0),
@@ -1911,21 +1976,44 @@ def data_section_upper():
         st.markdown(
             f"""
             <div class="panel">
-                <div class="panel-title">極端值監控</div>
+                <div class="panel-title">市場家數統計監控</div>
                 {extreme_html}
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # --- 面板3: 多空家數統計分布圖 ---
-    with p3:
+    # ===== 第二排：多空家數統計分布圖（趨勢 + 快照）=====
+    _bucket_cols = ['bucket_up_2_5', 'bucket_up_5', 'bucket_up_7_5', 'bucket_up_above',
+                    'bucket_down_2_5', 'bucket_down_5', 'bucket_down_7_5', 'bucket_down_above']
+    _fig_bar = None
+    if len(history_df) > 1 and all(c in history_df.columns for c in _bucket_cols):
+        _bar_df = history_df.copy()
+        _bar_df['snapshot_time'] = pd.to_datetime(_bar_df['snapshot_time'], errors='coerce')
+        _bar_df = _bar_df.dropna(subset=['snapshot_time'])
+        _bar_df = _bar_df.set_index('snapshot_time')[_bucket_cols].resample('5min').mean().dropna().reset_index()
+        for _col in _bucket_cols:
+            _bar_df[_col] = _bar_df[_col].rolling(window=3, center=True, min_periods=1).mean()
+        _fig_bar = make_diverging_bar(_bar_df)
+        add_time_markers(_fig_bar, date_str)
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if _fig_bar is not None:
+            st.plotly_chart(_fig_bar, width="stretch", key="upper-diverging-bar")
+        else:
+            st.markdown(
+                '<div class="panel" style="text-align:center; padding:40px;">'
+                '<p class="gray">📊 多空家數強弱勢統計分布圖需要多筆快照資料</p></div>',
+                unsafe_allow_html=True)
+    with b2:
         st.plotly_chart(
-            make_distribution_chart(snapshot_df, _settings, "多空家數統計分布圖", height=340),
+            make_distribution_chart(snapshot_df, _settings, "多空家數區間加速分佈圖", height=380),
             width="stretch",
+            key="upper-distribution-chart",
         )
 
-    # ===== 第二排：市場細分析 =====
+    # ===== 第三排：市場細分析 =====
     st.markdown('<div class="section-hdr">🔍 市場細分析</div>', unsafe_allow_html=True)
 
     # 重新讀取 CSV（可能剛被設定彈窗更新）
@@ -1936,12 +2024,14 @@ def data_section_upper():
     with m1:
         st.plotly_chart(
             make_top_stocks_chart(snapshot_df, tse_list, "上市市值前20大"),
-            width="stretch"
+            width="stretch",
+            key="mkt-tse-top20",
         )
     with m2:
         st.plotly_chart(
             make_top_stocks_chart(snapshot_df, otc_list, "上櫃市值前20大"),
-            width="stretch"
+            width="stretch",
+            key="mkt-otc-top20",
         )
 
     weighted_symbols = list(dict.fromkeys(tse_list + otc_list))
@@ -1956,7 +2046,8 @@ def data_section_upper():
     with m3:
         st.plotly_chart(
             make_distribution_chart(weighted_df, _settings, "權值股漲跌分布"),
-            width="stretch"
+            width="stretch",
+            key="mkt-weighted-dist",
         )
     with m4:
         st.plotly_chart(
@@ -1966,7 +2057,8 @@ def data_section_upper():
                 f"高價股漲跌分布 (>{format_threshold(high_price_threshold)}元)",
                 subtitle=f"高價股家數：{len(high_price_df)}家",
             ),
-            width="stretch"
+            width="stretch",
+            key="mkt-highprice-dist",
         )
 
     # ===== 個股排行（預設收合，點開才渲染）=====
@@ -1993,7 +2085,7 @@ def trend_section():
     """下半部：趨勢圖區（獨立 fragment，不擋上半部渲染）"""
     try:
         stats = load_latest_stats()
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         st.error(f"趨勢資料載入失敗：{e}")
         return
 
@@ -2004,7 +2096,7 @@ def trend_section():
     date_str = stime[:10]
     try:
         history_df = load_stats_history(date_str)
-    except sqlite3.Error as e:
+    except psycopg2.Error as e:
         st.error(f"趨勢資料載入失敗：{e}")
         return
 

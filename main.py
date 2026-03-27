@@ -8,7 +8,7 @@ import os
 import time
 import json
 import math
-import sqlite3
+import traceback
 import logging
 from datetime import datetime, timedelta
 
@@ -16,8 +16,22 @@ from datetime import datetime, timedelta
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-import config
+from lib.db import get_connection, init_all_tables, ensure_columns, read_sql, qone, qall, qexec, qmany
+
+try:
+    import config as _cfg
+    _FUBON_ID        = os.environ.get('FUBON_ID')        or _cfg.FUBON_ID
+    _FUBON_PWD       = os.environ.get('FUBON_PWD')       or _cfg.FUBON_PWD
+    _FUBON_CERT_PATH = os.environ.get('FUBON_CERT_PATH') or _cfg.FUBON_CERT_PATH
+    _FUBON_CERT_PWD  = os.environ.get('FUBON_CERT_PWD')  or _cfg.FUBON_CERT_PWD
+except ImportError:
+    _FUBON_ID        = os.environ['FUBON_ID']
+    _FUBON_PWD       = os.environ['FUBON_PWD']
+    _FUBON_CERT_PATH = os.environ.get('FUBON_CERT_PATH', '')
+    _FUBON_CERT_PWD  = os.environ['FUBON_CERT_PWD']
+
 from fubon_neo.sdk import FubonSDK
+from postmarket_sync import sync_date as sync_daily
 
 # === 讀取設定檔 ===
 SETTINGS_PATH = os.path.join(BASE_DIR, 'config', 'settings.json')
@@ -27,7 +41,6 @@ with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
     SETTINGS = json.load(f)
 
 # === 常數設定 ===
-DB_PATH = os.path.join(BASE_DIR, 'data', 'market.db')
 LOG_DIR = os.path.join(BASE_DIR, 'log')
 FETCH_INTERVAL = 15  # 快照間隔固定 15 秒
 MARKET_OPEN_HOUR = 9
@@ -37,6 +50,7 @@ MARKET_CLOSE_MIN = 35
 RELOGIN_INTERVAL = 7200      # 2 小時（秒）
 RAW_KEEP_DAYS = 2
 COMPUTED_KEEP_DAYS = 20
+DAILY_CLOSING_KEEP_DAYS = 2200   # 約 6 年
 LOG_KEEP_DAYS = 30
 
 
@@ -185,159 +199,242 @@ def setup_logging():
 # ============================================================
 
 def init_db():
-    """建立 SQLite 資料庫與資料表"""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    # /mnt/c 下的 SQLite 搭配 WAL 容易出現 shared-memory/lock 問題。
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    """建立 PostgreSQL 連線並初始化資料表"""
+    conn = get_connection()
+    init_all_tables(conn)
 
-    conn.executescript("""
-    -- 第一層：原始快照
-    CREATE TABLE IF NOT EXISTS raw_snapshots (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        snapshot_time   TEXT NOT NULL,
-        market          TEXT NOT NULL,
-        type            TEXT,
-        symbol          TEXT NOT NULL,
-        name            TEXT,
-        open_price      REAL,
-        high_price      REAL,
-        low_price       REAL,
-        close_price     REAL,
-        last_price      REAL,
-        change          REAL,
-        change_percent  REAL,
-        reference_price REAL,
-        trade_volume    INTEGER,
-        trade_value     REAL,
-        last_updated    INTEGER,
-        is_anomaly      INTEGER DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_raw_time ON raw_snapshots(snapshot_time);
-    CREATE INDEX IF NOT EXISTS idx_raw_symbol ON raw_snapshots(symbol);
-
-    -- 第二層：彙總統計（每 15 秒一筆）
-    CREATE TABLE IF NOT EXISTS computed_stats (
-        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-        snapshot_time           TEXT NOT NULL,
-        filtered_total          INTEGER,
-        -- 漲跌家數
-        up_count                INTEGER,
-        down_count              INTEGER,
-        flat_count              INTEGER,
-        tse_up_count            INTEGER,
-        otc_up_count            INTEGER,
-        -- 量能
-        total_trade_value       REAL,
-        total_trade_volume      INTEGER,
-        -- 核心指標
-        sentiment_index         REAL,
-        ad_ratio                REAL,
-        volatility              REAL,
-        strength_index          REAL,
-        activity_rate           REAL,
-        -- 分桶分布（漲）
-        bucket_up_2_5           INTEGER,
-        bucket_up_5             INTEGER,
-        bucket_up_7_5           INTEGER,
-        bucket_up_above         INTEGER,
-        -- 分桶分布（跌）
-        bucket_down_2_5         INTEGER,
-        bucket_down_5           INTEGER,
-        bucket_down_7_5         INTEGER,
-        bucket_down_above       INTEGER,
-        -- 強弱勢家數
-        advantage_count         INTEGER,
-        strong_count            INTEGER,
-        super_strong_count      INTEGER,
-        near_limit_up_count     INTEGER,
-        disadvantage_count      INTEGER,
-        weak_count              INTEGER,
-        super_weak_count        INTEGER,
-        near_limit_down_count   INTEGER,
-        -- 強勢股延續性
-        prev_strong_count       INTEGER,
-        prev_strong_avg_today   REAL,
-        prev_strong_positive_rate REAL,
-        prev_weak_count         INTEGER,
-        prev_weak_avg_today     REAL,
-        prev_weak_negative_rate REAL,
-        -- 百大強弱勢平均漲幅
-        top_n_avg               REAL,
-        bottom_n_avg            REAL,
-        -- 權值股
-        blue_chip_up_count      INTEGER,
-        blue_chip_total         INTEGER,
-        blue_chip_avg_change    REAL
-    );
-    CREATE INDEX IF NOT EXISTS idx_computed_time ON computed_stats(snapshot_time);
-
-    -- 第三層：每日摘要
-    CREATE TABLE IF NOT EXISTS daily_summary (
-        id                          INTEGER PRIMARY KEY AUTOINCREMENT,
-        date                        TEXT NOT NULL UNIQUE,
-        market_open_time            TEXT,
-        market_close_time           TEXT,
-        total_snapshots             INTEGER,
-        total_stocks                INTEGER,
-        open_snapshot_time          TEXT,
-        open_gap_up_count           INTEGER,
-        open_gap_down_count         INTEGER,
-        open_flat_count             INTEGER,
-        open_valid_count            INTEGER,
-        mid_30min_up_count          INTEGER,
-        mid_30min_down_count        INTEGER,
-        pre_close_up_count          INTEGER,
-        pre_close_down_count        INTEGER,
-        close_up_count              INTEGER,
-        close_down_count            INTEGER,
-        close_flat_count            INTEGER,
-        close_tse_up                INTEGER,
-        close_otc_up                INTEGER,
-        max_up_count                INTEGER,
-        max_up_count_time           TEXT,
-        min_up_count                INTEGER,
-        min_up_count_time           TEXT,
-        total_amount                REAL,
-        total_volume                INTEGER,
-        tse_amount                  REAL,
-        otc_amount                  REAL,
-        prev_day_amount             REAL,
-        amount_ratio                REAL,
-        advance_decline_ratio       REAL,
-        sentiment_label             TEXT,
-        note                        TEXT
-    );
-    """)
-
-    # 舊資料庫補欄位，避免既有 DB 因 schema 落後而失敗
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(computed_stats)")}
-    for column_def in [
+    # 補欄位（舊資料庫相容）
+    ensure_columns(conn, 'computed_stats', [
         "prev_weak_count INTEGER",
         "prev_weak_avg_today REAL",
         "prev_weak_negative_rate REAL",
-    ]:
-        col_name = column_def.split()[0]
-        if col_name not in existing_cols:
-            conn.execute(f"ALTER TABLE computed_stats ADD COLUMN {column_def}")
-
-    conn.commit()
+        "red_k_count INTEGER",
+        "black_k_count INTEGER",
+        "flat_k_count INTEGER",
+        "above_5pct_count INTEGER",
+    ])
+    ensure_columns(conn, 'daily_closing', [
+        "above_5pct_count INTEGER",
+        "new_high_20d_count INTEGER",
+        "new_low_20d_count INTEGER",
+        "above_5ma_count INTEGER",
+        "above_20ma_count INTEGER",
+        "above_60ma_count INTEGER",
+        "above_5ma_pct REAL",
+        "above_20ma_pct REAL",
+        "above_60ma_pct REAL",
+        "margin_maintenance_rate REAL",
+    ])
     return conn
 
 
 def cleanup_old_data(conn, logger):
-    """清除過期資料：raw 保留 2 天，computed 保留 20 天"""
+    """清除過期資料：raw 保留 2 天，computed 保留 20 天，daily_closing 保留 2200 天。
+    raw_snapshots 資料量大（每日 ~200 萬筆），採分批刪除（每批 5000 筆）避免長時間鎖定資料庫。
+    """
+    _BATCH_SIZE = 5000
     now = datetime.now()
     raw_cutoff = (now - timedelta(days=RAW_KEEP_DAYS)).strftime('%Y-%m-%d 00:00:00')
     computed_cutoff = (now - timedelta(days=COMPUTED_KEEP_DAYS)).strftime('%Y-%m-%d 00:00:00')
+    closing_cutoff = (now - timedelta(days=DAILY_CLOSING_KEEP_DAYS)).strftime('%Y-%m-%d')
 
-    cur1 = conn.execute("DELETE FROM raw_snapshots WHERE snapshot_time < ?", (raw_cutoff,))
-    cur2 = conn.execute("DELETE FROM computed_stats WHERE snapshot_time < ?", (computed_cutoff,))
+    # computed_stats 和 daily_closing 資料量小，直接刪
+    cur2 = qexec(conn, "DELETE FROM computed_stats WHERE snapshot_time < %s", (computed_cutoff,))
+    cur3 = qexec(conn, "DELETE FROM daily_closing WHERE date < %s", (closing_cutoff,))
     conn.commit()
+    if cur2.rowcount > 0 or cur3.rowcount > 0:
+        logger.info(f"清理舊資料：computed {cur2.rowcount} 筆, closing {cur3.rowcount} 筆")
 
-    if cur1.rowcount > 0 or cur2.rowcount > 0:
-        logger.info(f"清理舊資料：raw {cur1.rowcount} 筆, computed {cur2.rowcount} 筆")
+    # raw_snapshots 分批刪除，每批 commit 後釋放鎖，讓儀表板可在批次間讀取
+    total_deleted = 0
+    batch_num = 0
+    while True:
+        cur1 = qexec(conn,
+            "DELETE FROM raw_snapshots WHERE id IN ("
+            "  SELECT id FROM raw_snapshots WHERE snapshot_time < %s LIMIT %s"
+            ")", (raw_cutoff, _BATCH_SIZE))
+        conn.commit()
+        total_deleted += cur1.rowcount
+        batch_num += 1
+        if cur1.rowcount < _BATCH_SIZE:
+            break
+        if batch_num % 50 == 0:
+            logger.info(f"清理 raw_snapshots 進度：已刪除 {total_deleted:,} 筆...")
+        time.sleep(0.1)
+
+    if total_deleted > 0:
+        logger.info(f"清理舊資料：raw_snapshots 共刪除 {total_deleted:,} 筆（{batch_num} 批）")
+
+
+def _compute_today_rolling_indicators(conn, today_str, logger):
+    """
+    計算當日的 20 日創新高/新低家數與均線結構，並 UPDATE 回 daily_closing。
+    只讀取近 80 個交易日資料（60MA 需 60 天 + 緩衝）。
+    """
+    try:
+        import pandas as pd
+        dates = qall(conn,
+            "SELECT DISTINCT date FROM daily_stocks WHERE date <= %s ORDER BY date DESC LIMIT 80",
+            (today_str,)
+        )
+        if len(dates) < 20:
+            logger.warning("_compute_today_rolling_indicators: daily_stocks 不足 20 日，跳過")
+            return
+        earliest = dates[-1][0]
+        df = read_sql(
+            """SELECT symbol, date, close_price FROM daily_stocks
+               WHERE date >= %s AND date <= %s AND close_price IS NOT NULL AND close_price > 0""",
+            conn, params=(earliest, today_str)
+        )
+        df = df[df['symbol'].str.match(r'^[1-9]\d{3}$')]
+        if df.empty or today_str not in df['date'].values:
+            return
+        pivot = df.pivot_table(index='date', columns='symbol',
+                               values='close_price', aggfunc='first').sort_index()
+
+        if today_str not in pivot.index:
+            return
+
+        rm20  = pivot.rolling(20, min_periods=20).max()
+        rmin20 = pivot.rolling(20, min_periods=20).min()
+        sma5   = pivot.rolling(5,  min_periods=5).mean()
+        sma20  = pivot.rolling(20, min_periods=20).mean()
+        sma60  = pivot.rolling(60, min_periods=60).mean()
+
+        row    = pivot.loc[today_str]
+        c_high = int(((row == rm20.loc[today_str]) & rm20.loc[today_str].notna()).sum())
+        c_low  = int(((row == rmin20.loc[today_str]) & rmin20.loc[today_str].notna()).sum())
+        c5     = int((row > sma5.loc[today_str]).sum())  if today_str in sma5.index  else 0
+        c20    = int((row > sma20.loc[today_str]).sum()) if today_str in sma20.index else 0
+        c60    = int((row > sma60.loc[today_str]).sum()) if today_str in sma60.index else 0
+        v5     = int(sma5.loc[today_str].notna().sum())  if today_str in sma5.index  else 0
+        v20    = int(sma20.loc[today_str].notna().sum()) if today_str in sma20.index else 0
+        v60    = int(sma60.loc[today_str].notna().sum()) if today_str in sma60.index else 0
+
+        qexec(conn, """
+            UPDATE daily_closing SET
+                new_high_20d_count = %s, new_low_20d_count  = %s,
+                above_5ma_count    = %s, above_20ma_count   = %s, above_60ma_count = %s,
+                above_5ma_pct      = %s, above_20ma_pct     = %s, above_60ma_pct   = %s
+            WHERE date = %s
+        """, (
+            c_high, c_low, c5, c20, c60,
+            round(c5  / v5  * 100, 2) if v5  > 0 else None,
+            round(c20 / v20 * 100, 2) if v20 > 0 else None,
+            round(c60 / v60 * 100, 2) if v60 > 0 else None,
+            today_str,
+        ))
+        conn.commit()
+        logger.info(f"rolling 指標已更新：新高 {c_high} 新低 {c_low}  "
+                    f"5MA:{c5} 20MA:{c20} 60MA:{c60}")
+    except Exception as e:
+        logger.error(f"_compute_today_rolling_indicators 失敗：{e}")
+
+
+def save_daily_closing(conn, logger):
+    """將今日最後一筆 computed_stats 存入 daily_closing（收盤後呼叫）"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM computed_stats WHERE snapshot_time LIKE %s ORDER BY snapshot_time DESC LIMIT 1",
+        (f"{today}%",)
+    )
+    row = cur.fetchone()
+    if not row:
+        logger.warning("save_daily_closing: 今日無 computed_stats 資料，略過")
+        return
+    cols = [d[0] for d in cur.description]
+    cs = dict(zip(cols, row))
+    qexec(conn, """
+        INSERT INTO daily_closing (
+            date, filtered_total, above_5pct_count,
+            up_count, down_count, flat_count, red_k_count, black_k_count, flat_k_count,
+            tse_up_count, otc_up_count,
+            total_trade_value, total_trade_volume,
+            sentiment_index, ad_ratio, volatility, strength_index, activity_rate,
+            bucket_up_2_5, bucket_up_5, bucket_up_7_5, bucket_up_above,
+            bucket_down_2_5, bucket_down_5, bucket_down_7_5, bucket_down_above,
+            advantage_count, strong_count, super_strong_count, near_limit_up_count,
+            disadvantage_count, weak_count, super_weak_count, near_limit_down_count,
+            prev_strong_count, prev_strong_avg_today, prev_strong_positive_rate,
+            prev_weak_count, prev_weak_avg_today, prev_weak_negative_rate,
+            top_n_avg, bottom_n_avg,
+            blue_chip_up_count, blue_chip_total, blue_chip_avg_change,
+            volume_tide_up_value, volume_tide_down_value,
+            volume_tide_net, volume_tide_up_pct, volume_tide_down_pct
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (date) DO UPDATE SET
+            filtered_total=EXCLUDED.filtered_total, above_5pct_count=EXCLUDED.above_5pct_count,
+            up_count=EXCLUDED.up_count, down_count=EXCLUDED.down_count,
+            flat_count=EXCLUDED.flat_count, red_k_count=EXCLUDED.red_k_count,
+            black_k_count=EXCLUDED.black_k_count, flat_k_count=EXCLUDED.flat_k_count,
+            tse_up_count=EXCLUDED.tse_up_count, otc_up_count=EXCLUDED.otc_up_count,
+            total_trade_value=EXCLUDED.total_trade_value,
+            total_trade_volume=EXCLUDED.total_trade_volume,
+            sentiment_index=EXCLUDED.sentiment_index, ad_ratio=EXCLUDED.ad_ratio,
+            volatility=EXCLUDED.volatility, strength_index=EXCLUDED.strength_index,
+            activity_rate=EXCLUDED.activity_rate,
+            bucket_up_2_5=EXCLUDED.bucket_up_2_5, bucket_up_5=EXCLUDED.bucket_up_5,
+            bucket_up_7_5=EXCLUDED.bucket_up_7_5, bucket_up_above=EXCLUDED.bucket_up_above,
+            bucket_down_2_5=EXCLUDED.bucket_down_2_5, bucket_down_5=EXCLUDED.bucket_down_5,
+            bucket_down_7_5=EXCLUDED.bucket_down_7_5, bucket_down_above=EXCLUDED.bucket_down_above,
+            advantage_count=EXCLUDED.advantage_count, strong_count=EXCLUDED.strong_count,
+            super_strong_count=EXCLUDED.super_strong_count,
+            near_limit_up_count=EXCLUDED.near_limit_up_count,
+            disadvantage_count=EXCLUDED.disadvantage_count, weak_count=EXCLUDED.weak_count,
+            super_weak_count=EXCLUDED.super_weak_count,
+            near_limit_down_count=EXCLUDED.near_limit_down_count,
+            prev_strong_count=EXCLUDED.prev_strong_count,
+            prev_strong_avg_today=EXCLUDED.prev_strong_avg_today,
+            prev_strong_positive_rate=EXCLUDED.prev_strong_positive_rate,
+            prev_weak_count=EXCLUDED.prev_weak_count,
+            prev_weak_avg_today=EXCLUDED.prev_weak_avg_today,
+            prev_weak_negative_rate=EXCLUDED.prev_weak_negative_rate,
+            top_n_avg=EXCLUDED.top_n_avg, bottom_n_avg=EXCLUDED.bottom_n_avg,
+            blue_chip_up_count=EXCLUDED.blue_chip_up_count,
+            blue_chip_total=EXCLUDED.blue_chip_total,
+            blue_chip_avg_change=EXCLUDED.blue_chip_avg_change,
+            volume_tide_up_value=EXCLUDED.volume_tide_up_value,
+            volume_tide_down_value=EXCLUDED.volume_tide_down_value,
+            volume_tide_net=EXCLUDED.volume_tide_net,
+            volume_tide_up_pct=EXCLUDED.volume_tide_up_pct,
+            volume_tide_down_pct=EXCLUDED.volume_tide_down_pct
+    """, (
+        today, cs.get('filtered_total'), cs.get('above_5pct_count'),
+        cs.get('up_count'), cs.get('down_count'), cs.get('flat_count'),
+        cs.get('red_k_count'), cs.get('black_k_count'), cs.get('flat_k_count'),
+        cs.get('tse_up_count'), cs.get('otc_up_count'),
+        cs.get('total_trade_value'), cs.get('total_trade_volume'),
+        cs.get('sentiment_index'), cs.get('ad_ratio'), cs.get('volatility'),
+        cs.get('strength_index'), cs.get('activity_rate'),
+        cs.get('bucket_up_2_5'), cs.get('bucket_up_5'),
+        cs.get('bucket_up_7_5'), cs.get('bucket_up_above'),
+        cs.get('bucket_down_2_5'), cs.get('bucket_down_5'),
+        cs.get('bucket_down_7_5'), cs.get('bucket_down_above'),
+        cs.get('advantage_count'), cs.get('strong_count'),
+        cs.get('super_strong_count'), cs.get('near_limit_up_count'),
+        cs.get('disadvantage_count'), cs.get('weak_count'),
+        cs.get('super_weak_count'), cs.get('near_limit_down_count'),
+        cs.get('prev_strong_count'), cs.get('prev_strong_avg_today'),
+        cs.get('prev_strong_positive_rate'),
+        cs.get('prev_weak_count'), cs.get('prev_weak_avg_today'),
+        cs.get('prev_weak_negative_rate'),
+        cs.get('top_n_avg'), cs.get('bottom_n_avg'),
+        cs.get('blue_chip_up_count'), cs.get('blue_chip_total'),
+        cs.get('blue_chip_avg_change'),
+        cs.get('volume_tide_up_value'), cs.get('volume_tide_down_value'),
+        cs.get('volume_tide_net'), cs.get('volume_tide_up_pct'),
+        cs.get('volume_tide_down_pct'),
+    ))
+    conn.commit()
+    logger.info(f"save_daily_closing: {today} 收盤指標已存入 daily_closing")
+
+    # 補算 rolling 指標（20日新高/新低、均線結構）
+    _compute_today_rolling_indicators(conn, today, logger)
 
 
 def cleanup_old_logs(logger):
@@ -370,10 +467,20 @@ def cleanup_old_logs(logger):
 def sdk_login(logger):
     """登入富邦 API，回傳 sdk 物件"""
     sdk = FubonSDK()
-    cert_path = win_to_wsl(config.FUBON_CERT_PATH)
+
+    cert_b64 = os.environ.get('FUBON_CERT_B64')
+    if cert_b64:
+        import base64, tempfile
+        fd, cert_path = tempfile.mkstemp(suffix='.pfx')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(base64.b64decode(cert_b64))
+        logger.info("使用 FUBON_CERT_B64 環境變數憑證")
+    else:
+        cert_path = win_to_wsl(_FUBON_CERT_PATH)
+        logger.info(f"使用本機憑證：{cert_path}")
 
     try:
-        sdk.login(config.FUBON_ID, config.FUBON_PWD, cert_path, config.FUBON_CERT_PWD)
+        sdk.login(_FUBON_ID, _FUBON_PWD, cert_path, _FUBON_CERT_PWD)
         logger.info("登入富邦 API 成功")
     except Exception as e:
         logger.error(f"登入失敗：{e}")
@@ -495,13 +602,13 @@ def write_raw(conn, items, snapshot_time, logger):
                 item.get('lastUpdated'), 0
             ))
 
-    conn.executemany("""
+    qmany(conn, """
         INSERT INTO raw_snapshots (
             snapshot_time, market, type, symbol, name,
             open_price, high_price, low_price, close_price, last_price,
             change, change_percent, reference_price,
             trade_volume, trade_value, last_updated, is_anomaly
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, rows)
     conn.commit()
 
@@ -509,6 +616,104 @@ def write_raw(conn, items, snapshot_time, logger):
         logger.warning(f"異常資料：{anomaly_count} 筆")
 
     return len(rows), anomaly_count
+
+
+# ============================================================
+#  啟動時自動補齊 daily_stocks
+# ============================================================
+
+def verify_daily_stocks(conn, dt, logger):
+    """檢核單日 daily_stocks 資料品質"""
+    ds = dt.strftime('%Y-%m-%d')
+    total = qone(conn, "SELECT COUNT(*) FROM daily_stocks WHERE date = %s", (ds,))[0]
+
+    if total == 0:
+        return
+
+    null_close = qone(conn, "SELECT COUNT(*) FROM daily_stocks WHERE date = %s AND close_price IS NULL", (ds,))[0]
+
+    complete_ohlc = qone(conn, """
+        SELECT COUNT(*) FROM daily_stocks WHERE date = %s
+        AND open_price IS NOT NULL AND high_price IS NOT NULL
+        AND low_price IS NOT NULL AND close_price IS NOT NULL
+    """, (ds,))[0]
+
+    ohlc_pct = complete_ohlc / total * 100 if total > 0 else 0
+
+    if total < 1500:
+        logger.warning(f"  ⚠ {ds}: 只有 {total} 檔（預期 1800~2000）")
+    else:
+        logger.info(f"  {ds}: {total} 檔, OHLC 完整率 {ohlc_pct:.1f}% ✓")
+
+    if null_close > total * 0.05:
+        logger.warning(f"  ⚠ {ds}: close_price NULL {null_close} 筆（{null_close/total*100:.1f}%）")
+
+
+def ensure_daily_stocks(conn, today_str, logger):
+    """
+    啟動時確保 daily_stocks 有最近兩個有效交易日的資料。
+    從昨天開始往回找，累計找到 2 個有資料的交易日就停止。
+    """
+    today = datetime.strptime(today_str, '%Y-%m-%d')
+
+    # 查目前狀態
+    latest = qone(conn, "SELECT MAX(date) FROM daily_stocks")[0]
+    logger.info(f"daily_stocks 最新日期: {latest or '（無資料）'}")
+
+    # 從昨天開始往回找
+    found_trading_days = 0
+    needed = 2  # 強弱勢股計算需要前兩個交易日
+    max_lookback = 30
+    check_date = today - timedelta(days=1)
+
+    for _ in range(max_lookback):
+        if found_trading_days >= needed:
+            break
+
+        # 跳過週末
+        if check_date.weekday() >= 5:
+            check_date -= timedelta(days=1)
+            continue
+
+        ds = check_date.strftime('%Y-%m-%d')
+
+        # 檢查 DB 是否已有該日且品質合格
+        existing_count = qone(conn, "SELECT COUNT(*) FROM daily_stocks WHERE date = %s", (ds,))[0]
+
+        if existing_count >= 1500:
+            logger.info(f"  {ds}: 已有 {existing_count} 檔 ✓")
+            found_trading_days += 1
+            check_date -= timedelta(days=1)
+            continue
+
+        # 需要補抓
+        logger.info(f"  {ds}: 資料不足（{existing_count} 檔），開始補同步...")
+        try:
+            count = sync_daily(conn, check_date, logger)
+        except Exception as e:
+            logger.warning(f"  {ds}: 補同步失敗 → {e}")
+            logger.debug(traceback.format_exc())
+            check_date -= timedelta(days=1)
+            continue
+
+        if count == 0:
+            # 非交易日（國定假日等），跳過不計數
+            logger.info(f"  {ds}: 非交易日，跳過")
+            check_date -= timedelta(days=1)
+            continue
+
+        # 補抓成功，做檢核
+        verify_daily_stocks(conn, check_date, logger)
+        found_trading_days += 1
+        check_date -= timedelta(days=1)
+
+    if found_trading_days < needed:
+        logger.warning(
+            f"⚠ 只找到 {found_trading_days} 個有效交易日（需要 {needed}），"
+            f"前日強弱勢指標可能無法計算"
+        )
+    else:
+        logger.info(f"daily_stocks 就緒：最近 {needed} 個交易日資料完整")
 
 
 # ============================================================
@@ -521,9 +726,7 @@ def get_prev_strong_symbols(conn, today_str):
     回傳 set of symbols，若無資料回傳空 set。
     """
     # 找前一交易日（daily_stocks 中 < today 的最大日期）
-    row = conn.execute(
-        "SELECT MAX(date) FROM daily_stocks WHERE date < ?", (today_str,)
-    ).fetchone()
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
 
     if not row or not row[0]:
         return set()
@@ -533,9 +736,7 @@ def get_prev_strong_symbols(conn, today_str):
     # 計算漲幅：需要 close_price 和前一天的 close
     # daily_stocks 沒有直接的 change_percent，需要用 raw 或自己算
     # 但我們有 postmarket_sync 的 OHLCV，可以用兩天的 close 算
-    prev_prev_row = conn.execute(
-        "SELECT MAX(date) FROM daily_stocks WHERE date < ?", (prev_date,)
-    ).fetchone()
+    prev_prev_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (prev_date,))
 
     if not prev_prev_row or not prev_prev_row[0]:
         return set()
@@ -543,14 +744,14 @@ def get_prev_strong_symbols(conn, today_str):
     prev_prev_date = prev_prev_row[0]
 
     # 取前一天漲幅超過門檻的股票
-    rows = conn.execute("""
+    rows = qall(conn, """
         SELECT d1.symbol
         FROM daily_stocks d1
-        JOIN daily_stocks d0 ON d1.symbol = d0.symbol AND d0.date = ?
-        WHERE d1.date = ?
+        JOIN daily_stocks d0 ON d1.symbol = d0.symbol AND d0.date = %s
+        WHERE d1.date = %s
           AND d0.close_price > 0
-          AND ((d1.close_price - d0.close_price) / d0.close_price * 100) > ?
-    """, (prev_prev_date, prev_date, CONTINUITY_THRESHOLD)).fetchall()
+          AND ((d1.close_price - d0.close_price) / d0.close_price * 100) > %s
+    """, (prev_prev_date, prev_date, CONTINUITY_THRESHOLD))
 
     return set(r[0] for r in rows)
 
@@ -560,32 +761,28 @@ def get_prev_weak_symbols(conn, today_str):
     從 daily_stocks 取得前一交易日跌幅 < -CONTINUITY_THRESHOLD 的股票代號清單。
     回傳 set of symbols，若無資料回傳空 set。
     """
-    row = conn.execute(
-        "SELECT MAX(date) FROM daily_stocks WHERE date < ?", (today_str,)
-    ).fetchone()
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
 
     if not row or not row[0]:
         return set()
 
     prev_date = row[0]
 
-    prev_prev_row = conn.execute(
-        "SELECT MAX(date) FROM daily_stocks WHERE date < ?", (prev_date,)
-    ).fetchone()
+    prev_prev_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (prev_date,))
 
     if not prev_prev_row or not prev_prev_row[0]:
         return set()
 
     prev_prev_date = prev_prev_row[0]
 
-    rows = conn.execute("""
+    rows = qall(conn, """
         SELECT d1.symbol
         FROM daily_stocks d1
-        JOIN daily_stocks d0 ON d1.symbol = d0.symbol AND d0.date = ?
-        WHERE d1.date = ?
+        JOIN daily_stocks d0 ON d1.symbol = d0.symbol AND d0.date = %s
+        WHERE d1.date = %s
           AND d0.close_price > 0
-          AND ((d1.close_price - d0.close_price) / d0.close_price * 100) < ?
-    """, (prev_prev_date, prev_date, -CONTINUITY_THRESHOLD)).fetchall()
+          AND ((d1.close_price - d0.close_price) / d0.close_price * 100) < %s
+    """, (prev_prev_date, prev_date, -CONTINUITY_THRESHOLD))
 
     return set(r[0] for r in rows)
 
@@ -614,6 +811,23 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
     flat = sum(1 for p in pcts if p == 0)
     tse_up = sum(1 for i in valid if i['_market'] == 'TSE' and i['changePercent'] > 0)
     otc_up = sum(1 for i in valid if i['_market'] == 'OTC' and i['changePercent'] > 0)
+
+    # --- K棒顏色家數（收盤 vs 今日開盤）---
+    red_k_count = sum(
+        1 for i in valid
+        if i.get('openPrice') is not None and i.get('closePrice') is not None
+        and i['closePrice'] > i['openPrice']
+    )
+    black_k_count = sum(
+        1 for i in valid
+        if i.get('openPrice') is not None and i.get('closePrice') is not None
+        and i['closePrice'] < i['openPrice']
+    )
+    flat_k_count = sum(
+        1 for i in valid
+        if i.get('openPrice') is not None and i.get('closePrice') is not None
+        and i['closePrice'] == i['openPrice']
+    )
 
     # --- 量能 ---
     total_value = sum(i.get('tradeValue', 0) or 0 for i in valid)
@@ -694,6 +908,9 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
             negative = sum(1 for p in today_pcts if p < 0)
             prev_weak_negative_rate = round(negative / len(today_pcts) * 100, 2)
 
+    # --- 漲幅超過 5% 家數 ---
+    above_5pct_count = sum(1 for p in pcts if p > 5.0)
+
     # --- 百大強弱勢平均漲幅（排除漲跌幅 > 10.01%）---
     normal_pcts = [p for p in pcts if abs(p) <= ABNORMAL_THRESHOLD]
     normal_pcts_sorted = sorted(normal_pcts, reverse=True)
@@ -701,6 +918,14 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
     n = min(TOP_BOTTOM_N, len(normal_pcts_sorted))
     top_n_avg = round(sum(normal_pcts_sorted[:n]) / n, 4) if n > 0 else None
     bottom_n_avg = round(sum(normal_pcts_sorted[-n:]) / n, 4) if n > 0 else None
+
+    # --- 量能潮汐 ---
+    vt_up_value = sum(i.get('tradeValue', 0) or 0 for i in valid if i['changePercent'] > 0)
+    vt_down_value = sum(i.get('tradeValue', 0) or 0 for i in valid if i['changePercent'] < 0)
+    vt_total = vt_up_value + vt_down_value
+    vt_net = round((vt_up_value - vt_down_value) / 1e8, 2) if vt_total > 0 else 0
+    vt_up_pct = round(vt_up_value / vt_total * 100, 2) if vt_total > 0 else None
+    vt_down_pct = round(vt_down_value / vt_total * 100, 2) if vt_total > 0 else None
 
     # --- 權值股 ---
     blue_items = [i for i in valid if i.get('symbol') in BLUE_CHIPS]
@@ -710,10 +935,11 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
     blue_chip_avg_change = round(sum(blue_pcts) / len(blue_pcts), 4) if blue_pcts else None
 
     # --- 寫入 ---
-    conn.execute("""
+    qexec(conn, """
         INSERT INTO computed_stats (
-            snapshot_time, filtered_total,
-            up_count, down_count, flat_count, tse_up_count, otc_up_count,
+            snapshot_time, filtered_total, above_5pct_count,
+            up_count, down_count, flat_count, red_k_count, black_k_count, flat_k_count,
+            tse_up_count, otc_up_count,
             total_trade_value, total_trade_volume,
             sentiment_index, ad_ratio, volatility, strength_index, activity_rate,
             bucket_up_2_5, bucket_up_5, bucket_up_7_5, bucket_up_above,
@@ -723,11 +949,13 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
             prev_strong_count, prev_strong_avg_today, prev_strong_positive_rate,
             prev_weak_count, prev_weak_avg_today, prev_weak_negative_rate,
             top_n_avg, bottom_n_avg,
-            blue_chip_up_count, blue_chip_total, blue_chip_avg_change
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            blue_chip_up_count, blue_chip_total, blue_chip_avg_change,
+            volume_tide_up_value, volume_tide_down_value,
+            volume_tide_net, volume_tide_up_pct, volume_tide_down_pct
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
-        snapshot_time, filtered_total,
-        up, down, flat, tse_up, otc_up,
+        snapshot_time, filtered_total, above_5pct_count,
+        up, down, flat, red_k_count, black_k_count, flat_k_count, tse_up, otc_up,
         total_value, total_volume,
         sentiment_index, ad_ratio, volatility, strength_index, activity_rate,
         bucket_up_2_5, bucket_up_5, bucket_up_7_5, bucket_up_above,
@@ -738,6 +966,7 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
         prev_weak_count, prev_weak_avg_today, prev_weak_negative_rate,
         top_n_avg, bottom_n_avg,
         blue_chip_up_count, blue_chip_total, blue_chip_avg_change,
+        vt_up_value, vt_down_value, vt_net, vt_up_pct, vt_down_pct,
     ))
     conn.commit()
 
@@ -798,13 +1027,10 @@ def main():
     logger.info("[SYSTEM ] 盤中情緒監控系統啟動")
     logger.info("=" * 50)
 
-    # 週末檢查
     now = datetime.now()
-    if now.weekday() >= 5:
-        logger.info("[SYSTEM ] 今天是週末，程式不執行")
-        return
+    is_weekend = now.weekday() >= 5
 
-    # 初始化資料庫
+    # 初始化資料庫（週末也執行，用於維護）
     conn = init_db()
     logger.info("資料庫初始化完成")
     reload_settings(logger)
@@ -814,18 +1040,38 @@ def main():
     cleanup_old_data(conn, logger)
     cleanup_old_logs(logger)
 
-    # 預先載入昨日強勢股清單（用於延續性指標）
+    # 自動補齊 daily_stocks（證交所/櫃買中心盤後資料）
     today_str = now.strftime('%Y-%m-%d')
+    ensure_daily_stocks(conn, today_str, logger)
+
+    # 載入昨日強勢/弱勢股清單（用於延續性指標）
     prev_strong_symbols = get_prev_strong_symbols(conn, today_str)
     prev_weak_symbols = get_prev_weak_symbols(conn, today_str)
-    if prev_strong_symbols:
-        logger.info(f"昨日強勢股（>{CONTINUITY_THRESHOLD}%）：{len(prev_strong_symbols)} 檔")
+
+    # 印出實際基準日期（不論結果是否為空）
+    prev_date_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+    prev_date = prev_date_row[0] if prev_date_row and prev_date_row[0] else None
+
+    if prev_date:
+        prev_prev_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (prev_date,))
+        prev_prev_date = prev_prev_row[0] if prev_prev_row and prev_prev_row[0] else None
+        logger.info(f"前日強弱勢基準: {prev_date} vs {prev_prev_date}")
+        logger.info(f"  昨日強勢股（>{CONTINUITY_THRESHOLD}%）：{len(prev_strong_symbols)} 檔")
+        logger.info(f"  昨日弱勢股（<-{CONTINUITY_THRESHOLD}%）：{len(prev_weak_symbols)} 檔")
     else:
-        logger.info("無昨日強勢股資料（可能尚未同步盤後資料）")
-    if prev_weak_symbols:
-        logger.info(f"昨日弱勢股（<-{CONTINUITY_THRESHOLD}%）：{len(prev_weak_symbols)} 檔")
-    else:
-        logger.info("無昨日弱勢股資料（可能尚未同步盤後資料）")
+        logger.warning("⚠ daily_stocks 無資料，前日強弱勢指標將顯示 N/A")
+
+    # DB 健康狀態報告
+    _ds_dates = qone(conn, "SELECT COUNT(DISTINCT date) FROM daily_stocks")[0]
+    _ds_latest = qone(conn, "SELECT MAX(date) FROM daily_stocks")[0] or '無'
+    _cs_dates = qone(conn, "SELECT COUNT(DISTINCT substr(snapshot_time,1,10)) FROM computed_stats")[0]
+    logger.info(f"DB 狀態: daily_stocks {_ds_dates} 個交易日（最新 {_ds_latest}）, computed_stats {_cs_dates} 個交易日")
+
+    # 週末：維護完成即結束，不進入盤中監控
+    if is_weekend:
+        conn.close()
+        logger.info("[SYSTEM ] 今天是週末，資料維護完成，不進入盤中監控")
+        return
 
     # 登入富邦 API
     sdk = sdk_login(logger)
@@ -837,6 +1083,7 @@ def main():
     }
 
     snapshot_count = 0
+    _cleanup_tick = 0        # 盤中增量清理計數器
 
     # === 主迴圈 ===
     while True:
@@ -909,7 +1156,21 @@ def main():
         elapsed = time.time() - t_start
         logger.info(f"快照 #{snapshot_count} 完成：{count} 筆，耗時 {elapsed:.2f} 秒")
 
+        # 盤中增量清理（每 60 個快照 ≈ 15 分鐘執行一批，防止 raw_snapshots 堆積）
+        _cleanup_tick += 1
+        if _cleanup_tick >= 60:
+            _cleanup_tick = 0
+            _raw_cutoff = (datetime.now() - timedelta(days=RAW_KEEP_DAYS)).strftime('%Y-%m-%d 00:00:00')
+            _cur = qexec(conn,
+                "DELETE FROM raw_snapshots WHERE id IN ("
+                "  SELECT id FROM raw_snapshots WHERE snapshot_time < %s LIMIT 5000"
+                ")", (_raw_cutoff,))
+            conn.commit()
+            if _cur.rowcount > 0:
+                logger.info(f"盤中增量清理 raw_snapshots：{_cur.rowcount} 筆")
+
     # === 收盤收尾 ===
+    save_daily_closing(conn, logger)
     conn.close()
     logger.info(f"[SYSTEM ] 今日共完成 {snapshot_count} 次快照")
     logger.info("[SYSTEM ] 系統正常關閉")

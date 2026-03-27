@@ -1,0 +1,39 @@
+{
+    "font": {
+        "title_size": 16,
+        "axis_tick_size": 11,
+        "legend_size": 10,
+        "stat_card_value_rem": 1.6,
+        "stat_card_label_rem": 0.82
+    },
+    "chart": {
+        "height": 400,
+        "line_width_raw": 1.5,
+        "line_width_ma5": 2.5,
+        "raw_alpha": 0.35,
+        "band_alpha_outer": 0.08,
+        "band_alpha_inner": 0.18,
+        "show_bands": false,
+        "show_median": true,
+        "show_p5_p95": true,
+        "show_iqr_outlier": true
+    },
+    "palette": {
+        "primary": "#3B82C4",
+        "positive": "#E07050",
+        "negative": "#4CAF8A",
+        "p5p95_color": "#8B5CF6",
+        "sma_colors": [
+            "#E8A838",
+            "#3B82C4",
+            "#8B72BE"
+        ],
+        "median_color": "#F97316",
+        "iqr_outlier_color": "#EF4444"
+    },
+    "table": {
+        "show_all_columns": false,
+        "height": 480
+    },
+    "lookback": 1000
+}
