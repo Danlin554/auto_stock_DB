@@ -459,7 +459,7 @@ def merge_and_write(conn, dt, ohlcv, institutional, margin, logger):
             dealer_net, inst_total_net,
             margin_buy, margin_sell, margin_redeem, margin_balance,
             short_sell, short_buy, short_redeem, short_balance,
-            offset
+            "offset"
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(date, symbol) DO UPDATE SET
             market=EXCLUDED.market, name=EXCLUDED.name,
@@ -476,7 +476,7 @@ def merge_and_write(conn, dt, ohlcv, institutional, margin, logger):
             margin_redeem=EXCLUDED.margin_redeem, margin_balance=EXCLUDED.margin_balance,
             short_sell=EXCLUDED.short_sell, short_buy=EXCLUDED.short_buy,
             short_redeem=EXCLUDED.short_redeem, short_balance=EXCLUDED.short_balance,
-            offset=EXCLUDED.offset
+            "offset"=EXCLUDED."offset"
     """, rows)
     conn.commit()
 

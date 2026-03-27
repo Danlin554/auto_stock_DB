@@ -31,6 +31,14 @@ sys.path.insert(0, BASE_DIR)
 from lib.db import get_connection, init_all_tables
 
 
+# PostgreSQL 保留字清單（欄位名稱衝突時需加引號）
+_PG_RESERVED = {'offset', 'order', 'limit', 'group', 'table', 'index', 'type'}
+
+def _qcol(c):
+    """如果欄位名稱是保留字，加雙引號"""
+    return f'"{c}"' if c.lower() in _PG_RESERVED else c
+
+
 # ── 工具 ─────────────────────────────────────────────────────
 
 def progress(current, total, label=''):
@@ -59,10 +67,19 @@ def migrate_daily_closing(sqlite_conn, pg_conn):
 
     # 確認欄位（以 SQLite 實際欄位為準，id 欄位不遷移）
     cols = [c for c in df.columns if c != 'id']
-    rows = [tuple(row[c] for c in cols) for _, row in df.iterrows()]
+    # int64 超過 INTEGER 上限的欄位轉 float（避免 psycopg2 整數溢出）
+    _INT_MAX = 2_147_483_647
+    for col in cols:
+        if str(df[col].dtype) == 'int64' and df[col].abs().max() > _INT_MAX:
+            df[col] = df[col].astype(float)
+    # NaN → None（psycopg2 只接受 None 作為 NULL）
+    rows = [
+        tuple(None if (v != v) else v for v in row)
+        for row in df[cols].itertuples(index=False)
+    ]
 
-    col_str = ', '.join(cols)
-    update_set = ', '.join(f"{c}=EXCLUDED.{c}" for c in cols if c != 'date')
+    col_str = ', '.join(_qcol(c) for c in cols)
+    update_set = ', '.join(f"{_qcol(c)}=EXCLUDED.{_qcol(c)}" for c in cols if c != 'date')
     on_conflict = f"ON CONFLICT (date) DO UPDATE SET {update_set}"
 
     BATCH = 500
@@ -118,9 +135,9 @@ def migrate_daily_stocks(sqlite_conn, pg_conn):
         sqlite_conn, params=(need_dates[0],)
     )
     cols = [c for c in sample.columns if c != 'id']
-    col_str = ', '.join(cols)
+    col_str = ', '.join(_qcol(c) for c in cols)
     update_set = ', '.join(
-        f"{c}=EXCLUDED.{c}" for c in cols if c not in ('date', 'symbol')
+        f"{_qcol(c)}=EXCLUDED.{_qcol(c)}" for c in cols if c not in ('date', 'symbol')
     )
     on_conflict = f"ON CONFLICT (date, symbol) DO UPDATE SET {update_set}"
     sql = f"INSERT INTO daily_stocks ({col_str}) VALUES %s {on_conflict}"
@@ -133,7 +150,10 @@ def migrate_daily_stocks(sqlite_conn, pg_conn):
             sqlite_conn, params=(d,)
         )
         df = df[[c for c in df.columns if c != 'id']]
-        rows = list(df.itertuples(index=False, name=None))
+        rows = [
+            tuple(None if (v != v) else v for v in row)
+            for row in df.itertuples(index=False)
+        ]
         if rows:
             with pg_conn.cursor() as cur:
                 psycopg2.extras.execute_values(cur, sql, rows, page_size=500)
@@ -172,8 +192,13 @@ def main():
     sqlite_conn = sqlite3.connect(SQLITE_PATH)
     pg_conn = get_connection()
 
-    # 確保 PostgreSQL 表存在
-    print('\n建立 PostgreSQL 資料表（若不存在）...')
+    # 先刪除空資料表（讓 BIGINT DDL 修正生效），再重建
+    print('\n清除並重建 PostgreSQL 資料表...')
+    with pg_conn.cursor() as cur:
+        for tbl in ['daily_closing', 'daily_stocks', 'computed_stats',
+                    'raw_snapshots', 'daily_summary']:
+            cur.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
+    pg_conn.commit()
     init_all_tables(pg_conn)
     print('  完成')
 

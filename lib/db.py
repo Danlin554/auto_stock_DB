@@ -20,7 +20,7 @@ def get_connection():
     conn = psycopg2.connect(url)
     with conn.cursor() as cur:
         cur.execute("SET timezone = 'Asia/Taipei'")
-    conn.autocommit = False
+    conn.commit()
     return conn
 
 
@@ -128,7 +128,7 @@ def init_all_tables(conn):
             tse_up_count              INTEGER,
             otc_up_count              INTEGER,
             total_trade_value         REAL,
-            total_trade_volume        INTEGER,
+            total_trade_volume        BIGINT,
             sentiment_index           REAL,
             ad_ratio                  REAL,
             volatility                REAL,
@@ -196,7 +196,7 @@ def init_all_tables(conn):
             min_up_count          INTEGER,
             min_up_count_time     TEXT,
             total_amount          REAL,
-            total_volume          INTEGER,
+            total_volume          BIGINT,
             tse_amount            REAL,
             otc_amount            REAL,
             prev_day_amount       REAL,
@@ -220,7 +220,7 @@ def init_all_tables(conn):
             tse_up_count              INTEGER,
             otc_up_count              INTEGER,
             total_trade_value         REAL,
-            total_trade_volume        INTEGER,
+            total_trade_volume        BIGINT,
             sentiment_index           REAL,
             ad_ratio                  REAL,
             volatility                REAL,
@@ -301,7 +301,7 @@ def init_all_tables(conn):
             short_buy       INTEGER,
             short_redeem    INTEGER,
             short_balance   INTEGER,
-            offset          INTEGER,
+            "offset"        INTEGER,
             UNIQUE(date, symbol)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_daily_stocks_date   ON daily_stocks(date)",
