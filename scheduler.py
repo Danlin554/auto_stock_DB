@@ -108,7 +108,7 @@ def main():
     # 列出排程
     jobs = scheduler.get_jobs()
     for job in jobs:
-        logger.info(f"排程任務：{job.name} → 下次執行 {job.next_run_time}")
+        logger.info(f"排程任務：{job.name} (id={job.id})")
 
     logger.info("排程服務已啟動，等待任務觸發...")
 
