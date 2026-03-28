@@ -1312,11 +1312,13 @@ def main():
 
     # ---- 浮動時鐘按鈕 ----
     _is_market_open = 1 if now < market_close else 0
+    _clock_time = now.strftime('%H:%M:%S')
+    _clock_date = now.strftime('%Y/%m/%d')
     st.html(f"""
     <div id="fb-float-btn">
       <div class="fb-panel">
-        <div class="fb-time">--:--:--</div>
-        <div class="fb-date">----/--/--</div>
+        <div class="fb-time">{_clock_time}</div>
+        <div class="fb-date">{_clock_date}</div>
         <div class="fb-countdown">
           下次更新&ensp;<span class="fb-cd-num">--</span>s
         </div>
@@ -2072,12 +2074,12 @@ def data_section_upper():
                 top = snapshot_df.nlargest(30, 'change_percent')[cols].copy()
                 top.columns = names
                 top['漲跌幅%'] = top['漲跌幅%'].apply(lambda x: f"{x:+.2f}%")
-                st.dataframe(top, hide_index=True, width="stretch")
+                st.dataframe(top, hide_index=True, use_container_width=True)
             with tab2:
                 bot = snapshot_df.nsmallest(30, 'change_percent')[cols].copy()
                 bot.columns = names
                 bot['漲跌幅%'] = bot['漲跌幅%'].apply(lambda x: f"{x:+.2f}%")
-                st.dataframe(bot, hide_index=True, width="stretch")
+                st.dataframe(bot, hide_index=True, use_container_width=True)
 
 
 
