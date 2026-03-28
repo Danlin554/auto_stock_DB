@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import streamlit as st
+import streamlit.components.v1 as components
 import psycopg2
 
 from lib.db import get_connection, read_sql, qone
@@ -1314,7 +1315,8 @@ def main():
     _is_market_open = 1 if now < market_close else 0
     _clock_time = now.strftime('%H:%M:%S')
     _clock_date = now.strftime('%Y/%m/%d')
-    st.html(f"""
+    # HTML + CSS 直接注入主頁面 DOM（st.markdown 不走 iframe）
+    st.markdown(f"""
     <div id="fb-float-btn">
       <div class="fb-panel">
         <div class="fb-time">{_clock_time}</div>
@@ -1373,18 +1375,22 @@ def main():
         font-size: 24px; font-weight: 700; color: #e74c3c;
       }}
     </style>
-    <script>
+    """, unsafe_allow_html=True)
+    # JavaScript 透過 components.html（sandbox 含 allow-same-origin，可存取 window.parent）
+    components.html(f"""<script>
     (function() {{
-      if (window._fbFloatInterval) {{
-        clearInterval(window._fbFloatInterval);
-        window._fbFloatInterval = null;
+      var P = window.parent;
+      var D = P.document;
+      if (P._fbFloatInterval) {{
+        clearInterval(P._fbFloatInterval);
+        P._fbFloatInterval = null;
       }}
-      if (window._fbFloatRefreshHandler) {{
-        window.removeEventListener('fb-fragment-refresh', window._fbFloatRefreshHandler);
-        window._fbFloatRefreshHandler = null;
+      if (P._fbFloatRefreshHandler) {{
+        P.removeEventListener('fb-fragment-refresh', P._fbFloatRefreshHandler);
+        P._fbFloatRefreshHandler = null;
       }}
-      if (window._fbFloatPointerHandlers && window._fbFloatPointerHandlers.btn) {{
-        var old = window._fbFloatPointerHandlers;
+      if (P._fbFloatPointerHandlers && P._fbFloatPointerHandlers.btn) {{
+        var old = P._fbFloatPointerHandlers;
         old.btn.removeEventListener('pointerdown', old.down);
         old.btn.removeEventListener('pointermove', old.move);
         old.btn.removeEventListener('pointerup', old.up);
@@ -1392,7 +1398,7 @@ def main():
 
       var REFRESH = {_refresh_sec};
       var IS_OPEN = {_is_market_open};
-      var btn   = document.getElementById('fb-float-btn');
+      var btn   = D.getElementById('fb-float-btn');
       if (!btn) return;
       var circle = btn.querySelector('.fb-circle');
       var timeEl = btn.querySelector('.fb-time');
@@ -1423,13 +1429,13 @@ def main():
         }}
       }}
       tick();
-      window._fbFloatInterval = setInterval(tick, 1000);
+      P._fbFloatInterval = setInterval(tick, 1000);
 
       /* 監聽 fragment 刷新事件，歸零倒數 */
-      window._fbFloatRefreshHandler = function() {{
+      P._fbFloatRefreshHandler = function() {{
         countdownLeft = REFRESH;
       }};
-      window.addEventListener('fb-fragment-refresh', window._fbFloatRefreshHandler);
+      P.addEventListener('fb-fragment-refresh', P._fbFloatRefreshHandler);
 
       /* --- 拖曳 + 點擊 --- */
       var dragging = false, didDrag = false;
@@ -1450,8 +1456,8 @@ def main():
         var dx = e.clientX - sx, dy = e.clientY - sy;
         if (Math.abs(dx) > THRESHOLD || Math.abs(dy) > THRESHOLD) didDrag = true;
         if (didDrag) {{
-          var nl = Math.max(0, Math.min(sl + dx, window.innerWidth  - btn.offsetWidth));
-          var nt = Math.max(0, Math.min(st2 + dy, window.innerHeight - btn.offsetHeight));
+          var nl = Math.max(0, Math.min(sl + dx, P.innerWidth  - btn.offsetWidth));
+          var nt = Math.max(0, Math.min(st2 + dy, P.innerHeight - btn.offsetHeight));
           btn.style.right = 'auto'; btn.style.bottom = 'auto';
           btn.style.left = nl + 'px'; btn.style.top = nt + 'px';
         }}
@@ -1461,7 +1467,7 @@ def main():
         dragging = false;
         circle.style.cursor = 'grab';
         btn.releasePointerCapture(e.pointerId);
-        try {{ localStorage.setItem('fb-float-pos', JSON.stringify({{
+        try {{ P.localStorage.setItem('fb-float-pos', JSON.stringify({{
           l: btn.style.left, t: btn.style.top, r: btn.style.right, b: btn.style.bottom
         }})); }} catch(x) {{}}
         if (!didDrag) {{
@@ -1472,7 +1478,7 @@ def main():
       btn.addEventListener('pointerdown', onPointerDown);
       btn.addEventListener('pointermove', onPointerMove);
       btn.addEventListener('pointerup', onPointerUp);
-      window._fbFloatPointerHandlers = {{
+      P._fbFloatPointerHandlers = {{
         btn: btn, down: onPointerDown, move: onPointerMove, up: onPointerUp
       }};
 
@@ -1493,7 +1499,7 @@ def main():
 
       /* --- 恢復位置 --- */
       try {{
-        var saved = JSON.parse(localStorage.getItem('fb-float-pos'));
+        var saved = JSON.parse(P.localStorage.getItem('fb-float-pos'));
         if (saved && saved.l && saved.l !== 'auto') {{
           btn.style.left = saved.l; btn.style.top = saved.t;
           btn.style.right = 'auto'; btn.style.bottom = 'auto';
@@ -1501,8 +1507,7 @@ def main():
       }} catch(x) {{}}
       adjustPanel();
     }})();
-    </script>
-    """)
+    </script>""", height=0)
 
     # 上半部：面板 + 市場細分析 + 個股排行（輕量，快速刷新）
     st.fragment(data_section_upper, run_every=run_every)()
@@ -1614,9 +1619,9 @@ def data_section_upper():
     if freshness_warning:
         st.warning(freshness_warning)
     # 通知浮動按鈕：fragment 已刷新，倒數歸零
-    st.html("""<script>
-    window.dispatchEvent(new CustomEvent('fb-fragment-refresh'));
-    </script>""")
+    components.html("""<script>
+    window.parent.dispatchEvent(new CustomEvent('fb-fragment-refresh'));
+    </script>""", height=0)
 
     # === 載入量能指標 ===
     vt_df = load_volume_tide(date_str)
