@@ -12,6 +12,9 @@ import psycopg2
 
 from lib.db import get_connection, read_sql, qone
 
+# === Streamlit 設定（必須是第一個 st 指令）===
+st.set_page_config(page_title="盤中情緒監控", layout="wide", page_icon="📊")
+
 # === 路徑設定 ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_PATH = os.path.join(BASE_DIR, 'config', 'settings.json')
@@ -159,9 +162,6 @@ def load_stock_names():
 
 SETTINGS = load_settings()
 STOCK_NAMES = load_stock_names()
-
-# === Streamlit 設定 ===
-st.set_page_config(page_title="盤中情緒監控", layout="wide", page_icon="📊")
 
 # === 動態字體 CSS ===
 if 'font_base' not in st.session_state:
