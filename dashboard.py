@@ -1500,7 +1500,7 @@ def main():
       adjustPanel();
     }})();
     </script>
-    """, unsafe_allow_javascript=True)
+    """)
 
     # 上半部：面板 + 市場細分析 + 個股排行（輕量，快速刷新）
     st.fragment(data_section_upper, run_every=run_every)()
@@ -1614,7 +1614,7 @@ def data_section_upper():
     # 通知浮動按鈕：fragment 已刷新，倒數歸零
     st.html("""<script>
     window.dispatchEvent(new CustomEvent('fb-fragment-refresh'));
-    </script>""", unsafe_allow_javascript=True)
+    </script>""")
 
     # === 載入量能指標 ===
     vt_df = load_volume_tide(date_str)
