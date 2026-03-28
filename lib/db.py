@@ -10,13 +10,44 @@ import pandas as pd
 
 
 def get_connection():
-    """取得 PostgreSQL 連線，並設定時區為台北"""
-    url = os.environ.get('DATABASE_URL')
+    """取得 PostgreSQL 連線，並設定時區為台北
+
+    依序嘗試以下環境變數（支援 Zeabur 自動注入的各種名稱）：
+      DATABASE_URL / POSTGRES_URI / POSTGRESQL_URL /
+      ZEABUR_POSTGRESQL_CONNECTION_STRING
+    若以上皆無，嘗試用個別欄位（PGHOST / PGPORT / PGDATABASE / PGUSER / PGPASSWORD）組合。
+    """
+    # ── 1. 嘗試 connection string 形式的環境變數 ──────────
+    _URL_VARS = [
+        'DATABASE_URL',
+        'POSTGRES_URI',
+        'POSTGRESQL_URL',
+        'ZEABUR_POSTGRESQL_CONNECTION_STRING',
+    ]
+    url = None
+    for var in _URL_VARS:
+        url = os.environ.get(var)
+        if url:
+            break
+
+    # ── 2. 嘗試個別欄位組合（Zeabur 有時用 PGHOST 等注入）─
     if not url:
+        host = os.environ.get('PGHOST') or os.environ.get('POSTGRES_HOST')
+        port = os.environ.get('PGPORT') or os.environ.get('POSTGRES_PORT') or '5432'
+        db   = os.environ.get('PGDATABASE') or os.environ.get('POSTGRES_DB') or os.environ.get('POSTGRES_DATABASE')
+        user = os.environ.get('PGUSER') or os.environ.get('POSTGRES_USER') or os.environ.get('POSTGRES_USERNAME')
+        pwd  = os.environ.get('PGPASSWORD') or os.environ.get('POSTGRES_PASSWORD')
+        if host and db and user:
+            url = f"postgresql://{user}:{pwd}@{host}:{port}/{db}"
+
+    if not url:
+        checked = ', '.join(_URL_VARS) + ', PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD'
         raise RuntimeError(
-            "DATABASE_URL 環境變數未設定。\n"
+            "無法連線資料庫：找不到 PostgreSQL 連線設定。\n"
+            f"已檢查環境變數：{checked}\n"
             "本機請先設定：export DATABASE_URL='postgresql://user:pass@host:5432/dbname'"
         )
+
     conn = psycopg2.connect(url)
     with conn.cursor() as cur:
         cur.execute("SET timezone = 'Asia/Taipei'")
