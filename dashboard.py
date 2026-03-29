@@ -626,22 +626,31 @@ def load_breakout_symbols(today_str):
         prev_date = prev_row[0]
 
         def _query(window, direction):
-            """查詢突破股票（window=252 or 20, direction='high' or 'low'）"""
+            """查詢突破股票（window=252 or 20, direction='high' or 'low'）
+            改用 GROUP BY 替代窗口函數，避免全表掃描，只掃描最近 N 個交易日
+            """
             agg = "MAX(high_price)" if direction == 'high' else "MIN(low_price)"
             op = ">" if direction == 'high' else "<"
             factor = "* 1.001" if direction == 'high' else "* 0.999"
             sql = f"""
-                WITH ranked AS (
-                    SELECT symbol, date, close_price,
-                           {agg} OVER (
-                               PARTITION BY symbol ORDER BY date
-                               ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW
-                           ) as extreme
-                    FROM daily_stocks WHERE date <= %s
+                WITH recent_dates AS (
+                    SELECT DISTINCT date FROM daily_stocks
+                    WHERE date <= %s
+                    ORDER BY date DESC
+                    LIMIT %s
+                ),
+                period_extreme AS (
+                    SELECT symbol, {agg} as extreme
+                    FROM daily_stocks
+                    WHERE date IN (SELECT date FROM recent_dates)
+                    GROUP BY symbol
                 )
-                SELECT DISTINCT symbol FROM ranked WHERE date = %s AND close_price {op} extreme {factor}
+                SELECT d.symbol
+                FROM daily_stocks d
+                JOIN period_extreme e ON d.symbol = e.symbol
+                WHERE d.date = %s AND d.close_price {op} e.extreme {factor}
             """
-            rows = qall(conn, sql, (prev_date, prev_date))
+            rows = qall(conn, sql, (prev_date, window, prev_date))
             return {r[0] for r in rows}
 
         return {
