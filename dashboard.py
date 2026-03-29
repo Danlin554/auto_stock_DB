@@ -11,7 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import psycopg2
 
-from lib.db import get_connection, read_sql, qone, load_db_setting, save_db_setting, init_all_tables
+from lib.db import get_connection, read_sql, qone, qall, load_db_setting, save_db_setting, init_all_tables
 
 # === Streamlit 設定（必須是第一個 st 指令）===
 st.set_page_config(page_title="盤中情緒監控", layout="wide", page_icon="📊")
@@ -439,7 +439,7 @@ def settings_dialog():
             t3 = st.number_input("第 3 級", value=float(tiers[2]) if len(tiers) > 2 else 7.5,
                                  min_value=0.5, max_value=20.0, step=0.5, format="%.1f", key="s_t3")
 
-        if st.button("💾 儲存參數", key="save_params", width="stretch"):
+        if st.button("💾 儲存參數", key="save_params", use_container_width=True):
             new_settings = load_settings()  # 保留現有欄位（如 font_base）
             new_settings.update({
                 "volume_filter": volume_filter,
@@ -501,7 +501,7 @@ def settings_dialog():
                 "上櫃前 N 大", value=format_stock_list(load_csv_list(OTC_TOP20_PATH)),
                 height=250, key="edit_otc", label_visibility="collapsed")
 
-        if st.button("💾 儲存自選股", key="save_stocks", width="stretch"):
+        if st.button("💾 儲存自選股", key="save_stocks", use_container_width=True):
             blue_codes = parse_stock_input(blue_input)
             tse_codes = parse_stock_input(tse_input)
             otc_codes = parse_stock_input(otc_input)
@@ -558,7 +558,7 @@ def settings_dialog():
             <span style="font-size:11px; color:#999;">圖表高度預覽：{new_chart_height}px</span>
         </div>""", unsafe_allow_html=True)
 
-        if st.button("💾 套用字體與圖表設定", key="save_font", width="stretch"):
+        if st.button("💾 套用字體與圖表設定", key="save_font", use_container_width=True):
             st.session_state.font_base = new_size
             st.session_state.chart_font_base = new_chart_size
             st.session_state.chart_height_base = new_chart_height
@@ -612,6 +612,47 @@ def load_stats_history(date_str):
         conn.close()
     return df
 
+@st.cache_data(ttl=300)
+def load_breakout_symbols(today_str):
+    """從 daily_stocks 計算昨日突破52週/20日高低點的股票代號（快取5分鐘）
+    返回字典：{'high_52w': set, 'low_52w': set, 'high_20d': set, 'low_20d': set}
+    """
+    conn = open_db()
+    try:
+        # 查前一交易日
+        prev_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+        if not prev_row or not prev_row[0]:
+            return {'high_52w': set(), 'low_52w': set(), 'high_20d': set(), 'low_20d': set()}
+        prev_date = prev_row[0]
+
+        def _query(window, direction):
+            """查詢突破股票（window=252 or 20, direction='high' or 'low'）"""
+            agg = "MAX(high_price)" if direction == 'high' else "MIN(low_price)"
+            op = ">" if direction == 'high' else "<"
+            factor = "* 1.001" if direction == 'high' else "* 0.999"
+            sql = f"""
+                WITH ranked AS (
+                    SELECT symbol, date, close_price,
+                           {agg} OVER (
+                               PARTITION BY symbol ORDER BY date
+                               ROWS BETWEEN {window-1} PRECEDING AND CURRENT ROW
+                           ) as extreme
+                    FROM daily_stocks WHERE date <= %s
+                )
+                SELECT DISTINCT symbol FROM ranked WHERE date = %s AND close_price {op} extreme {factor}
+            """
+            rows = qall(conn, sql, (prev_date, prev_date))
+            return {r[0] for r in rows}
+
+        return {
+            'high_52w': _query(252, 'high'),
+            'low_52w':  _query(252, 'low'),
+            'high_20d': _query(20,  'high'),
+            'low_20d':  _query(20,  'low'),
+        }
+    finally:
+        conn.close()
+
 @st.cache_data(ttl=10)
 def load_latest_snapshot(vol_filter=0):
     """最新快照（快取 10 秒，volume_filter 變動時自動刷新，依 symbol 去重）"""
@@ -619,7 +660,7 @@ def load_latest_snapshot(vol_filter=0):
     try:
         df = read_sql("""
             SELECT symbol, name, market, change_percent, close_price, open_price,
-                   trade_volume, trade_value
+                   high_price, low_price, trade_volume, trade_value
             FROM raw_snapshots
             WHERE id IN (
                 SELECT MIN(id) FROM raw_snapshots
@@ -783,9 +824,9 @@ def add_time_markers(fig, date_str):
     for t, label in TREND_TIME_MARKERS:
         x_val = f"{date_str} {t}:00"
         fig.add_shape(type="line", x0=x_val, x1=x_val, y0=0, y1=1,
-                      yref="paper", line=dict(color="#ddd", width=1, dash="dot"))
-        fig.add_annotation(x=x_val, y=1, yref="paper", text=label,
-                           showarrow=False, font=dict(size=9, color="#aaa"),
+                      yref="paper", line=dict(color="#999", width=2, dash="dot"))
+        fig.add_annotation(x=x_val, y=1, yref="paper", text=f"<b>{label}</b>",
+                           showarrow=False, font=dict(size=11, color="#666"),
                            yshift=8)
 
 
@@ -1011,7 +1052,7 @@ def make_gauge(sentiment, s_min=None, s_max=None):
 
 
 def make_top_stocks_chart(snapshot_df, symbols, title):
-    """市值前N大水平長條圖（按CSV順序排列，顯示漲跌幅+漲跌比例條）"""
+    """市值前N大水平長條圖（按CSV順序排列，顯示漲跌幅+高低點標記）"""
     if snapshot_df.empty:
         return go.Figure()
     cfb = st.session_state.get('chart_font_base', 10)
@@ -1037,6 +1078,53 @@ def make_top_stocks_chart(snapshot_df, symbols, title):
         text=[f"{x:+.2f}%" for x in df['change_percent']],
         textposition='outside', textfont=dict(size=cfb, color='#4A90D9'),
     ))
+
+    # === 新增：最高/最低價漲跌幅標記（直線+虛線） ===
+    # 計算昨天收盤價
+    df['prev_close'] = df['close_price'] / (1 + df['change_percent'] / 100)
+
+    # 計算高低點漲跌幅
+    df['high_pct'] = ((df['high_price'] - df['prev_close']) / df['prev_close'] * 100).round(2)
+    df['low_pct'] = ((df['low_price'] - df['prev_close']) / df['prev_close'] * 100).round(2)
+
+    # 為每個股票加入最高/最低點直線（虛線）和標籤
+    for idx, (label, high_x, low_x) in enumerate(zip(labels, df['high_pct'], df['low_pct'])):
+        # 柱狀體從 idx-0.4 到 idx+0.4，中點在 idx
+        # 最高點：虛線在中點偏下（底部+1.5cm概念 = 中點-0.2），標籤在虛線上方
+        # 最低點：虛線在中點偏上（頂部-1.5cm概念 = 中點+0.2），標籤在虛線下方
+
+        # 最高點虛線（紅色系） - 柱狀體中點偏下
+        high_line_y = idx - 0.2
+        fig.add_shape(
+            type="line",
+            x0=high_x, y0=high_line_y - 0.12, x1=high_x, y1=high_line_y + 0.12,
+            line=dict(color='#e55300', width=2, dash='dash'),
+        )
+        # 最高點標籤 - 虛線上方
+        fig.add_annotation(
+            x=high_x, y=high_line_y + 0.28,
+            text=f"<i>{high_x:+.1f}%</i>",
+            showarrow=False,
+            font=dict(size=max(7, cfb-3), color='#e55300'),
+            xanchor='center',
+        )
+
+        # 最低點虛線（綠色系） - 柱狀體中點偏上
+        low_line_y = idx + 0.2
+        fig.add_shape(
+            type="line",
+            x0=low_x, y0=low_line_y - 0.12, x1=low_x, y1=low_line_y + 0.12,
+            line=dict(color='#009966', width=2, dash='dash'),
+        )
+        # 最低點標籤 - 虛線下方
+        fig.add_annotation(
+            x=low_x, y=low_line_y - 0.28,
+            text=f"<i>{low_x:+.1f}%</i>",
+            showarrow=False,
+            font=dict(size=max(7, cfb-3), color='#009966'),
+            xanchor='center',
+        )
+
     fig.update_layout(
         title=dict(text=title, font=dict(size=cfb+2)),
         height=max(350, len(df) * max(22, cfb*2+2)),
@@ -1784,8 +1872,8 @@ def data_section_upper():
     # === 取前一筆做箭頭比對 ===
     prev_row = history_df.iloc[-2] if len(history_df) >= 2 else None
 
-    # ===== 第一排：2面板 =====
-    p1, p2 = st.columns([1, 1])
+    # ===== 第一排：3面板 =====
+    p1, p2, p3 = st.columns([1, 1, 1])
 
     # --- 面板1: 市場數據總覽（全部指標）---
     with p1:
@@ -1804,6 +1892,48 @@ def data_section_upper():
         prev_weak_rate = stats.get('prev_weak_negative_rate')
         summary_prev_rate_range = format_range_text(history_df, 'prev_strong_positive_rate', decimals=2, suffix='%')
         summary_prev_weak_rate_range = format_range_text(history_df, 'prev_weak_negative_rate', decimals=2, suffix='%')
+
+        # 52週/20日高低點分桶
+        high_52w_count = stats.get('high_52w_count')
+        high_52w_avg = stats.get('high_52w_avg_today')
+        high_52w_rate = stats.get('high_52w_positive_rate')
+        low_52w_count = stats.get('low_52w_count')
+        low_52w_avg = stats.get('low_52w_avg_today')
+        low_52w_rate = stats.get('low_52w_negative_rate')
+        high_20d_count = stats.get('high_20d_count')
+        high_20d_avg = stats.get('high_20d_avg_today')
+        high_20d_rate = stats.get('high_20d_positive_rate')
+        low_20d_count = stats.get('low_20d_count')
+        low_20d_avg = stats.get('low_20d_avg_today')
+        low_20d_rate = stats.get('low_20d_negative_rate')
+
+        # === 直接從 daily_stocks 即時計算突破股票（覆蓋 computed_stats 的 None 值）===
+        _breakout_syms = load_breakout_symbols(today_str)
+
+        def _calc_breakout(syms, rate_type):
+            """計算突破股票的今日均漲跌幅與報酬率"""
+            s = snapshot_df[snapshot_df['symbol'].isin(syms)]
+            count = len(syms)
+            if s.empty:
+                return count, None, None
+            avg = round(s['change_percent'].mean(), 2)
+            if rate_type == 'positive':
+                rate = round((s['change_percent'] > 0).mean() * 100, 1)
+            else:
+                rate = round((s['change_percent'] < 0).mean() * 100, 1)
+            return count, avg, rate
+
+        # 計算4個分桶的統計
+        high_52w_count, high_52w_avg, high_52w_rate = _calc_breakout(_breakout_syms['high_52w'], 'positive')
+        low_52w_count,  low_52w_avg,  low_52w_rate  = _calc_breakout(_breakout_syms['low_52w'],  'negative')
+        high_20d_count, high_20d_avg, high_20d_rate = _calc_breakout(_breakout_syms['high_20d'], 'positive')
+        low_20d_count,  low_20d_avg,  low_20d_rate  = _calc_breakout(_breakout_syms['low_20d'],  'negative')
+
+        # 顏色判斷
+        h52_c = "red" if high_52w_avg is not None and high_52w_avg > 0 else "green" if high_52w_avg is not None and high_52w_avg < 0 else "gray"
+        l52_c = "red" if low_52w_avg is not None and low_52w_avg > 0 else "green" if low_52w_avg is not None and low_52w_avg < 0 else "gray"
+        h20_c = "red" if high_20d_avg is not None and high_20d_avg > 0 else "green" if high_20d_avg is not None and high_20d_avg < 0 else "gray"
+        l20_c = "red" if low_20d_avg is not None and low_20d_avg > 0 else "green" if low_20d_avg is not None and low_20d_avg < 0 else "gray"
         # 前日強弱勢股的資料日期
         _daily_date_str = load_daily_stocks_latest_date()
         _daily_date_label = ""
@@ -1923,54 +2053,6 @@ def data_section_upper():
             ),
             '</div>',
             vt_html,
-            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
-            metric_box_html(
-                format_metric_value(prev_count, decimals=0),
-                f"前日強勢股{_daily_date_label}",
-                "",
-                num_class="metric-num",
-                color_class="gray",
-            ),
-            metric_box_html(
-                format_metric_value(prev_avg, decimals=2, suffix='%', signed=True),
-                "今日均漲跌幅",
-                format_range_text(history_df, 'prev_strong_avg_today', decimals=2, suffix='%'),
-                num_class="metric-num",
-                color_class=pa_c,
-                arrow=_pa('prev_strong_avg_today'),
-            ),
-            metric_box_html(
-                format_metric_value(prev_rate, decimals=0, suffix='%'),
-                "正報酬率家數",
-                summary_prev_rate_range,
-                num_class="metric-num",
-                color_class="gray",
-            ),
-            '</div>',
-            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
-            metric_box_html(
-                format_metric_value(prev_weak_count, decimals=0),
-                f"前日弱勢股{_daily_date_label}",
-                "",
-                num_class="metric-num",
-                color_class="gray",
-            ),
-            metric_box_html(
-                format_metric_value(prev_weak_avg, decimals=2, suffix='%', signed=True),
-                "今日均漲跌幅",
-                format_range_text(history_df, 'prev_weak_avg_today', decimals=2, suffix='%'),
-                num_class="metric-num",
-                color_class=pw_c,
-                arrow=_pa('prev_weak_avg_today'),
-            ),
-            metric_box_html(
-                format_metric_value(prev_weak_rate, decimals=0, suffix='%'),
-                "負報酬率家數",
-                summary_prev_weak_rate_range,
-                num_class="metric-num",
-                color_class="gray",
-            ),
-            '</div>',
         ])
 
         # 情緒背景色
@@ -2124,11 +2206,174 @@ def data_section_upper():
             '</div>',
         ])
 
+        # 延續性分析面板（前日強弱勢股 + 52週/20日高低點）
+        continuation_html = "".join([
+            # 前日強勢股
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(prev_count, decimals=0),
+                f"前日強勢股{_daily_date_label}",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(prev_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'prev_strong_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=pa_c,
+                arrow=_pa('prev_strong_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(prev_rate, decimals=0, suffix='%'),
+                "正報酬率家數",
+                summary_prev_rate_range,
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(prev_weak_count, decimals=0),
+                f"前日弱勢股{_daily_date_label}",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(prev_weak_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'prev_weak_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=pw_c,
+                arrow=_pa('prev_weak_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(prev_weak_rate, decimals=0, suffix='%'),
+                "負報酬率家數",
+                summary_prev_weak_rate_range,
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+            # 52週高低點分桶
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(high_52w_count, decimals=0),
+                "52週高點突破",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(high_52w_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'high_52w_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=h52_c,
+                arrow=_pa('high_52w_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(high_52w_rate, decimals=0, suffix='%'),
+                "正報酬率家數",
+                format_range_text(history_df, 'high_52w_positive_rate', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(low_52w_count, decimals=0),
+                "52週低點跌破",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(low_52w_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'low_52w_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=l52_c,
+                arrow=_pa('low_52w_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(low_52w_rate, decimals=0, suffix='%'),
+                "負報酬率家數",
+                format_range_text(history_df, 'low_52w_negative_rate', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+            # 20日高低點分桶
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(high_20d_count, decimals=0),
+                "20日高點突破",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(high_20d_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'high_20d_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=h20_c,
+                arrow=_pa('high_20d_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(high_20d_rate, decimals=0, suffix='%'),
+                "正報酬率家數",
+                format_range_text(history_df, 'high_20d_positive_rate', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+            '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
+            metric_box_html(
+                format_metric_value(low_20d_count, decimals=0),
+                "20日低點跌破",
+                "",
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            metric_box_html(
+                format_metric_value(low_20d_avg, decimals=2, suffix='%', signed=True),
+                "今日均漲跌幅",
+                format_range_text(history_df, 'low_20d_avg_today', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class=l20_c,
+                arrow=_pa('low_20d_avg_today'),
+            ),
+            metric_box_html(
+                format_metric_value(low_20d_rate, decimals=0, suffix='%'),
+                "負報酬率家數",
+                format_range_text(history_df, 'low_20d_negative_rate', decimals=2, suffix='%'),
+                num_class="metric-num",
+                color_class="gray",
+            ),
+            '</div>',
+        ])
+
         st.markdown(
             f"""
             <div class="panel">
                 <div class="panel-title">市場家數統計監控</div>
                 {extreme_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # --- 面板3: 延續性分析 ---
+    with p3:
+        st.markdown(
+            f"""
+            <div class="panel">
+                <div class="panel-title">延續性分析</div>
+                {continuation_html}
             </div>
             """,
             unsafe_allow_html=True,
@@ -2159,7 +2404,7 @@ def data_section_upper():
                 unsafe_allow_html=True)
     with b2:
         st.plotly_chart(
-            make_distribution_chart(snapshot_df, _settings, "多空家數區間加速分佈圖", height=380),
+            make_distribution_chart(snapshot_df, _settings, "多空家數區間分佈圖", height=380),
             width="stretch",
             key="upper-distribution-chart",
         )

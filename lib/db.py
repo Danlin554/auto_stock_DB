@@ -220,7 +220,19 @@ def init_all_tables(conn):
             volume_tide_down_value    REAL,
             volume_tide_net           REAL,
             volume_tide_up_pct        REAL,
-            volume_tide_down_pct      REAL
+            volume_tide_down_pct      REAL,
+            high_52w_count            INTEGER,
+            high_52w_avg_today        REAL,
+            high_52w_positive_rate    REAL,
+            low_52w_count             INTEGER,
+            low_52w_avg_today         REAL,
+            low_52w_negative_rate     REAL,
+            high_20d_count            INTEGER,
+            high_20d_avg_today        REAL,
+            high_20d_positive_rate    REAL,
+            low_20d_count             INTEGER,
+            low_20d_avg_today         REAL,
+            low_20d_negative_rate     REAL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_computed_time ON computed_stats(snapshot_time)",
 
@@ -322,7 +334,19 @@ def init_all_tables(conn):
             above_5ma_pct             REAL,
             above_20ma_pct            REAL,
             above_60ma_pct            REAL,
-            margin_maintenance_rate   REAL
+            margin_maintenance_rate   REAL,
+            high_52w_count            INTEGER,
+            high_52w_avg_today        REAL,
+            high_52w_positive_rate    REAL,
+            low_52w_count             INTEGER,
+            low_52w_avg_today         REAL,
+            low_52w_negative_rate     REAL,
+            high_20d_count            INTEGER,
+            high_20d_avg_today        REAL,
+            high_20d_positive_rate    REAL,
+            low_20d_count             INTEGER,
+            low_20d_avg_today         REAL,
+            low_20d_negative_rate     REAL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_daily_closing_date ON daily_closing(date)",
 

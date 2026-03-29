@@ -215,6 +215,19 @@ def init_db():
         "black_k_count INTEGER",
         "flat_k_count INTEGER",
         "above_5pct_count INTEGER",
+        # 52週/20日高低點分桶（需求5）
+        "high_52w_count INTEGER",
+        "high_52w_avg_today REAL",
+        "high_52w_positive_rate REAL",
+        "low_52w_count INTEGER",
+        "low_52w_avg_today REAL",
+        "low_52w_negative_rate REAL",
+        "high_20d_count INTEGER",
+        "high_20d_avg_today REAL",
+        "high_20d_positive_rate REAL",
+        "low_20d_count INTEGER",
+        "low_20d_avg_today REAL",
+        "low_20d_negative_rate REAL",
     ])
     ensure_columns(conn, 'daily_closing', [
         "above_5pct_count INTEGER",
@@ -799,11 +812,130 @@ def get_prev_weak_symbols(conn, today_str):
     return set(r[0] for r in rows)
 
 
+def get_52w_high_symbols(conn, today_str):
+    """
+    從 daily_stocks 取得昨日收盤價突破過去 52 週最高點的股票代號清單。
+    回傳 set of symbols，若無資料回傳空 set。
+    """
+    # 找前一交易日
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+    if not row or not row[0]:
+        return set()
+
+    prev_date = row[0]
+
+    # 計算 52 週前的日期（252 個交易日）
+    rows = qall(conn, """
+        WITH price_history AS (
+            SELECT symbol, date, close_price,
+                   MAX(high_price) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) as max_high_252d
+            FROM daily_stocks
+            WHERE date <= %s
+        )
+        SELECT DISTINCT d1.symbol
+        FROM daily_stocks d1
+        JOIN price_history ph ON d1.symbol = ph.symbol AND ph.date = %s
+        WHERE d1.date = %s
+          AND d1.close_price > 0
+          AND d1.close_price > ph.max_high_252d * 1.001
+    """, (prev_date, prev_date, prev_date))
+
+    return set(r[0] for r in rows)
+
+
+def get_52w_low_symbols(conn, today_str):
+    """
+    從 daily_stocks 取得昨日收盤價跌破過去 52 週最低點的股票代號清單。
+    回傳 set of symbols，若無資料回傳空 set。
+    """
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+    if not row or not row[0]:
+        return set()
+
+    prev_date = row[0]
+
+    rows = qall(conn, """
+        WITH price_history AS (
+            SELECT symbol, date, close_price,
+                   MIN(low_price) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) as min_low_252d
+            FROM daily_stocks
+            WHERE date <= %s
+        )
+        SELECT DISTINCT d1.symbol
+        FROM daily_stocks d1
+        JOIN price_history ph ON d1.symbol = ph.symbol AND ph.date = %s
+        WHERE d1.date = %s
+          AND d1.close_price > 0
+          AND d1.close_price < ph.min_low_252d * 0.999
+    """, (prev_date, prev_date, prev_date))
+
+    return set(r[0] for r in rows)
+
+
+def get_20d_high_symbols(conn, today_str):
+    """
+    從 daily_stocks 取得昨日收盤價突破過去 20 日最高點的股票代號清單。
+    回傳 set of symbols，若無資料回傳空 set。
+    """
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+    if not row or not row[0]:
+        return set()
+
+    prev_date = row[0]
+
+    rows = qall(conn, """
+        WITH price_history AS (
+            SELECT symbol, date, close_price,
+                   MAX(high_price) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) as max_high_20d
+            FROM daily_stocks
+            WHERE date <= %s
+        )
+        SELECT DISTINCT d1.symbol
+        FROM daily_stocks d1
+        JOIN price_history ph ON d1.symbol = ph.symbol AND ph.date = %s
+        WHERE d1.date = %s
+          AND d1.close_price > 0
+          AND d1.close_price > ph.max_high_20d * 1.001
+    """, (prev_date, prev_date, prev_date))
+
+    return set(r[0] for r in rows)
+
+
+def get_20d_low_symbols(conn, today_str):
+    """
+    從 daily_stocks 取得昨日收盤價跌破過去 20 日最低點的股票代號清單。
+    回傳 set of symbols，若無資料回傳空 set。
+    """
+    row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
+    if not row or not row[0]:
+        return set()
+
+    prev_date = row[0]
+
+    rows = qall(conn, """
+        WITH price_history AS (
+            SELECT symbol, date, close_price,
+                   MIN(low_price) OVER (PARTITION BY symbol ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) as min_low_20d
+            FROM daily_stocks
+            WHERE date <= %s
+        )
+        SELECT DISTINCT d1.symbol
+        FROM daily_stocks d1
+        JOIN price_history ph ON d1.symbol = ph.symbol AND ph.date = %s
+        WHERE d1.date = %s
+          AND d1.close_price > 0
+          AND d1.close_price < ph.min_low_20d * 0.999
+    """, (prev_date, prev_date, prev_date))
+
+    return set(r[0] for r in rows)
+
+
 # ============================================================
 #  計算 computed_stats（完整版）
 # ============================================================
 
-def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_weak_symbols):
+def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_weak_symbols,
+                  high_52w_symbols, low_52w_symbols, high_20d_symbols, low_20d_symbols):
     """對全市場資料計算所有指標，寫入 computed_stats"""
     # 先篩一般股票（不含成交量濾網），用於 raw 寫入等
     all_regular = filter_regular_stocks(items)
@@ -920,6 +1052,70 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
             negative = sum(1 for p in today_pcts if p < 0)
             prev_weak_negative_rate = round(negative / len(today_pcts) * 100, 2)
 
+    # --- 52週高點突破股票 ---
+    high_52w_count = len(high_52w_symbols) if high_52w_symbols else None
+    high_52w_avg_today = None
+    high_52w_positive_rate = None
+
+    if high_52w_symbols:
+        today_pcts = []
+        for i in valid:
+            if i.get('symbol') in high_52w_symbols:
+                today_pcts.append(i['changePercent'])
+
+        if today_pcts:
+            high_52w_avg_today = round(sum(today_pcts) / len(today_pcts), 4)
+            positive = sum(1 for p in today_pcts if p > 0)
+            high_52w_positive_rate = round(positive / len(today_pcts) * 100, 2)
+
+    # --- 52週低點跌破股票 ---
+    low_52w_count = len(low_52w_symbols) if low_52w_symbols else None
+    low_52w_avg_today = None
+    low_52w_negative_rate = None
+
+    if low_52w_symbols:
+        today_pcts = []
+        for i in valid:
+            if i.get('symbol') in low_52w_symbols:
+                today_pcts.append(i['changePercent'])
+
+        if today_pcts:
+            low_52w_avg_today = round(sum(today_pcts) / len(today_pcts), 4)
+            negative = sum(1 for p in today_pcts if p < 0)
+            low_52w_negative_rate = round(negative / len(today_pcts) * 100, 2)
+
+    # --- 20日高點突破股票 ---
+    high_20d_count = len(high_20d_symbols) if high_20d_symbols else None
+    high_20d_avg_today = None
+    high_20d_positive_rate = None
+
+    if high_20d_symbols:
+        today_pcts = []
+        for i in valid:
+            if i.get('symbol') in high_20d_symbols:
+                today_pcts.append(i['changePercent'])
+
+        if today_pcts:
+            high_20d_avg_today = round(sum(today_pcts) / len(today_pcts), 4)
+            positive = sum(1 for p in today_pcts if p > 0)
+            high_20d_positive_rate = round(positive / len(today_pcts) * 100, 2)
+
+    # --- 20日低點跌破股票 ---
+    low_20d_count = len(low_20d_symbols) if low_20d_symbols else None
+    low_20d_avg_today = None
+    low_20d_negative_rate = None
+
+    if low_20d_symbols:
+        today_pcts = []
+        for i in valid:
+            if i.get('symbol') in low_20d_symbols:
+                today_pcts.append(i['changePercent'])
+
+        if today_pcts:
+            low_20d_avg_today = round(sum(today_pcts) / len(today_pcts), 4)
+            negative = sum(1 for p in today_pcts if p < 0)
+            low_20d_negative_rate = round(negative / len(today_pcts) * 100, 2)
+
     # --- 漲幅超過 5% 家數 ---
     above_5pct_count = sum(1 for p in pcts if p > 5.0)
 
@@ -963,8 +1159,12 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
             top_n_avg, bottom_n_avg,
             blue_chip_up_count, blue_chip_total, blue_chip_avg_change,
             volume_tide_up_value, volume_tide_down_value,
-            volume_tide_net, volume_tide_up_pct, volume_tide_down_pct
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            volume_tide_net, volume_tide_up_pct, volume_tide_down_pct,
+            high_52w_count, high_52w_avg_today, high_52w_positive_rate,
+            low_52w_count, low_52w_avg_today, low_52w_negative_rate,
+            high_20d_count, high_20d_avg_today, high_20d_positive_rate,
+            low_20d_count, low_20d_avg_today, low_20d_negative_rate
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """, (
         snapshot_time, filtered_total, above_5pct_count,
         up, down, flat, red_k_count, black_k_count, flat_k_count, tse_up, otc_up,
@@ -979,6 +1179,10 @@ def compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_
         top_n_avg, bottom_n_avg,
         blue_chip_up_count, blue_chip_total, blue_chip_avg_change,
         vt_up_value, vt_down_value, vt_net, vt_up_pct, vt_down_pct,
+        high_52w_count, high_52w_avg_today, high_52w_positive_rate,
+        low_52w_count, low_52w_avg_today, low_52w_negative_rate,
+        high_20d_count, high_20d_avg_today, high_20d_positive_rate,
+        low_20d_count, low_20d_avg_today, low_20d_negative_rate,
     ))
     conn.commit()
 
@@ -1059,6 +1263,12 @@ def main():
     # 載入昨日強勢/弱勢股清單（用於延續性指標）
     prev_strong_symbols = get_prev_strong_symbols(conn, today_str)
     prev_weak_symbols = get_prev_weak_symbols(conn, today_str)
+
+    # 載入 52 週/20 日高低點突破股票
+    high_52w_symbols = get_52w_high_symbols(conn, today_str)
+    low_52w_symbols = get_52w_low_symbols(conn, today_str)
+    high_20d_symbols = get_20d_high_symbols(conn, today_str)
+    low_20d_symbols = get_20d_low_symbols(conn, today_str)
 
     # 印出實際基準日期（不論結果是否為空）
     prev_date_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
@@ -1160,7 +1370,8 @@ def main():
 
         # --- 計算 computed_stats ---
         try:
-            compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_weak_symbols)
+            compute_stats(conn, items, snapshot_time, logger, prev_strong_symbols, prev_weak_symbols,
+                          high_52w_symbols, low_52w_symbols, high_20d_symbols, low_20d_symbols)
         except Exception as e:
             logger.error(f"computed_stats 計算失敗：{e}")
 
