@@ -614,28 +614,32 @@ def load_stats_history(date_str):
 
 @st.cache_data(ttl=300)
 def load_breakout_symbols(today_str):
-    """從 daily_stocks 計算昨日突破52週/20日高低點的股票代號（快取5分鐘）
-    返回字典：{'high_52w': set, 'low_52w': set, 'high_20d': set, 'low_20d': set}
+    """從 daily_stocks 計算昨日（T-1）突破240日/20日高低點的股票代號（快取5分鐘）
+    判斷邏輯：昨日最高價 > T-2 之前 N 個交易日的最高點（高點突破）
+              昨日最低價 < T-2 之前 N 個交易日的最低點（低點跌破）
+    返回字典：{'high_240d': set, 'low_240d': set, 'high_20d': set, 'low_20d': set}
     """
     conn = open_db()
     try:
-        # 查前一交易日
+        # 查前一交易日（T-1）
         prev_row = qone(conn, "SELECT MAX(date) FROM daily_stocks WHERE date < %s", (today_str,))
         if not prev_row or not prev_row[0]:
-            return {'high_52w': set(), 'low_52w': set(), 'high_20d': set(), 'low_20d': set()}
+            return {'high_240d': set(), 'low_240d': set(), 'high_20d': set(), 'low_20d': set()}
         prev_date = prev_row[0]
 
         def _query(window, direction):
-            """查詢突破股票（window=252 or 20, direction='high' or 'low'）
-            改用 GROUP BY 替代窗口函數，避免全表掃描，只掃描最近 N 個交易日
+            """查詢突破股票
+            window: 240 或 20（交易日數）
+            direction: 'high'（高點突破）或 'low'（低點跌破）
+            日期範圍：T-2 之前的 N 個交易日（不含 T-1 昨天），避免昨天自身干擾
             """
             agg = "MAX(high_price)" if direction == 'high' else "MIN(low_price)"
+            compare_col = "high_price" if direction == 'high' else "low_price"
             op = ">" if direction == 'high' else "<"
-            factor = "* 1.001" if direction == 'high' else "* 0.999"
             sql = f"""
                 WITH recent_dates AS (
                     SELECT DISTINCT date FROM daily_stocks
-                    WHERE date <= %s
+                    WHERE date < %s
                     ORDER BY date DESC
                     LIMIT %s
                 ),
@@ -648,16 +652,16 @@ def load_breakout_symbols(today_str):
                 SELECT d.symbol
                 FROM daily_stocks d
                 JOIN period_extreme e ON d.symbol = e.symbol
-                WHERE d.date = %s AND d.close_price {op} e.extreme {factor}
+                WHERE d.date = %s AND d.{compare_col} {op} e.extreme
             """
             rows = qall(conn, sql, (prev_date, window, prev_date))
             return {r[0] for r in rows}
 
         return {
-            'high_52w': _query(252, 'high'),
-            'low_52w':  _query(252, 'low'),
-            'high_20d': _query(20,  'high'),
-            'low_20d':  _query(20,  'low'),
+            'high_240d': _query(240, 'high'),
+            'low_240d':  _query(240, 'low'),
+            'high_20d':  _query(20,  'high'),
+            'low_20d':   _query(20,  'low'),
         }
     finally:
         conn.close()
@@ -1933,8 +1937,8 @@ def data_section_upper():
             return count, avg, rate
 
         # 計算4個分桶的統計
-        high_52w_count, high_52w_avg, high_52w_rate = _calc_breakout(_breakout_syms['high_52w'], 'positive')
-        low_52w_count,  low_52w_avg,  low_52w_rate  = _calc_breakout(_breakout_syms['low_52w'],  'negative')
+        high_52w_count, high_52w_avg, high_52w_rate = _calc_breakout(_breakout_syms['high_240d'], 'positive')
+        low_52w_count,  low_52w_avg,  low_52w_rate  = _calc_breakout(_breakout_syms['low_240d'],  'negative')
         high_20d_count, high_20d_avg, high_20d_rate = _calc_breakout(_breakout_syms['high_20d'], 'positive')
         low_20d_count,  low_20d_avg,  low_20d_rate  = _calc_breakout(_breakout_syms['low_20d'],  'negative')
 
@@ -2270,7 +2274,7 @@ def data_section_upper():
             '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
             metric_box_html(
                 format_metric_value(high_52w_count, decimals=0),
-                "52週高點突破",
+                "240日高點突破",
                 "",
                 num_class="metric-num",
                 color_class="gray",
@@ -2294,7 +2298,7 @@ def data_section_upper():
             '<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:4px;">',
             metric_box_html(
                 format_metric_value(low_52w_count, decimals=0),
-                "52週低點跌破",
+                "240日低點跌破",
                 "",
                 num_class="metric-num",
                 color_class="gray",
