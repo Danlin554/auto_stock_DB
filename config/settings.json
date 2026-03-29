@@ -1,10 +1,11 @@
 {
-    "volume_filter": 0,
+    "volume_filter": 500,
     "bucket_tiers": [
         2.5,
         5.0,
         7.5
     ],
+    "flat_threshold": 1.0,
     "limit_threshold": 9.5,
     "indicator_strong": 3.0,
     "indicator_super_strong": 7.5,

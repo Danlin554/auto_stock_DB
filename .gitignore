@@ -14,3 +14,7 @@ data/
 .claude/
 *.zip
 config.py
+.gstack/
+
+# Terminal Paste Image folder
+.cp-images/

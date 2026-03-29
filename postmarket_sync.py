@@ -551,9 +551,11 @@ def main():
             return
 
     conn = init_db()
-    cleanup_old_daily(conn, logger)
-    sync_date(conn, dt, logger)
-    conn.close()
+    try:
+        cleanup_old_daily(conn, logger)
+        sync_date(conn, dt, logger)
+    finally:
+        conn.close()
     logger.info("[SYSTEM ] 盤後同步結束")
 
 

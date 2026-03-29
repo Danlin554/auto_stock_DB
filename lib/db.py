@@ -117,6 +117,30 @@ def qmany(conn, sql, rows):
     return cur
 
 
+def load_db_setting(conn, key, default=None):
+    """從 app_settings 讀取一個設定值（字串）；不存在時回傳 default"""
+    try:
+        row = qone(conn, "SELECT value FROM app_settings WHERE key = %s", (key,))
+        return row[0] if row else default
+    except Exception:
+        return default
+
+
+def save_db_setting(conn, key, value):
+    """寫入 app_settings（upsert），value 為字串（通常是 JSON）"""
+    import datetime as _dt
+    ts = _dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+        """, (key, value, ts))
+    conn.commit()
+
+
 def init_all_tables(conn):
     """建立所有 PostgreSQL 資料表（幂等，已存在不影響）"""
     ddl_list = [
@@ -337,6 +361,13 @@ def init_all_tables(conn):
         )""",
         "CREATE INDEX IF NOT EXISTS idx_daily_stocks_date   ON daily_stocks(date)",
         "CREATE INDEX IF NOT EXISTS idx_daily_stocks_symbol ON daily_stocks(symbol)",
+
+        # ── 應用程式設定（儀表板設定、自選股清單）────────
+        """CREATE TABLE IF NOT EXISTS app_settings (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
     ]
 
     with conn.cursor() as cur:

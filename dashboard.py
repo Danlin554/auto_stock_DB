@@ -11,7 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import psycopg2
 
-from lib.db import get_connection, read_sql, qone
+from lib.db import get_connection, read_sql, qone, load_db_setting, save_db_setting, init_all_tables
 
 # === Streamlit 設定（必須是第一個 st 指令）===
 st.set_page_config(page_title="盤中情緒監控", layout="wide", page_icon="📊")
@@ -114,16 +114,30 @@ def _normalize_settings(raw):
 
 
 @st.cache_data(ttl=30)
-def _read_settings_json():
-    with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
-        return json.load(f)
+def _read_settings():
+    """優先從雲端資料庫讀取，fallback 讀本機 JSON 檔案"""
+    try:
+        conn = open_db()
+        try:
+            val = load_db_setting(conn, 'settings')
+        finally:
+            conn.close()
+        if val:
+            return json.loads(val)
+    except Exception:
+        pass
+    try:
+        with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def load_settings():
     try:
-        raw = _read_settings_json()
+        raw = _read_settings()
         if not isinstance(raw, dict):
-            raise ValueError("settings.json 內容不是物件格式")
+            raise ValueError("settings 內容不是物件格式")
         settings = _normalize_settings(raw)
         st.session_state.pop(SETTINGS_ERROR_KEY, None)
         return settings
@@ -131,24 +145,151 @@ def load_settings():
         st.session_state[SETTINGS_ERROR_KEY] = f"{type(e).__name__}: {e}"
         return _default_settings()
 
+
 def save_settings(data):
     normalized = _normalize_settings(data)
-    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
-        json.dump(normalized, f, ensure_ascii=False, indent=4)
-    _read_settings_json.clear()
+    payload = json.dumps(normalized, ensure_ascii=False)
+    # 寫入資料庫（雲端持久化）
+    try:
+        conn = open_db()
+        try:
+            init_all_tables(conn)   # 確保 app_settings 表存在
+            save_db_setting(conn, 'settings', payload)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    # 同時寫入本機 JSON（本地開發用）
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+            json.dump(normalized, f, ensure_ascii=False, indent=4)
+    except Exception:
+        pass
+    _read_settings.clear()
     st.session_state.pop(SETTINGS_ERROR_KEY, None)
+
+
+def _csv_db_key(path):
+    """根據路徑決定 DB 的 key 名稱"""
+    name = os.path.basename(path).replace('.csv', '')
+    return f'csv_{name}'
 
 
 @st.cache_data(ttl=300)
 def load_csv_list(path):
-    with open(path, 'r', encoding='utf-8') as f:
-        return [line.strip() for line in f if line.strip()]
+    """優先從資料庫讀取，fallback 讀本機 CSV；檔案不存在時回傳空清單"""
+    try:
+        conn = open_db()
+        try:
+            val = load_db_setting(conn, _csv_db_key(path))
+        finally:
+            conn.close()
+        if val is not None:
+            return [line.strip() for line in val.splitlines() if line.strip()]
+    except Exception:
+        pass
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+
 
 def save_csv_list(path, items):
-    with open(path, 'w', encoding='utf-8') as f:
-        for item in items:
-            f.write(item.strip() + '\n')
+    payload = '\n'.join(item.strip() for item in items if item.strip())
+    # 寫入資料庫
+    try:
+        conn = open_db()
+        try:
+            init_all_tables(conn)
+            save_db_setting(conn, _csv_db_key(path), payload)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    # 同時寫入本機 CSV
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(payload + '\n')
+    except Exception:
+        pass
     load_csv_list.clear()
+
+def compute_live_stats(df, settings):
+    """從最新快照即時計算受設定參數影響的面板指標，不依賴 computed_stats"""
+    if df is None or df.empty:
+        return {}
+    cp = pd.to_numeric(df['change_percent'], errors='coerce').dropna()
+    n = len(df)
+    if n == 0:
+        return {}
+
+    strong_thr = float(settings.get('indicator_strong', 3.0))
+    super_thr  = float(settings.get('indicator_super_strong', 7.5))
+    limit_thr  = float(settings.get('limit_threshold', 9.5))
+    top_n      = int(settings.get('top_bottom_n', 100))
+
+    uc = int((cp > 0).sum())
+    dc = int((cp < 0).sum())
+    fc = int((cp == 0).sum())
+
+    sc  = int((cp >= strong_thr).sum())
+    wc  = int((cp <= -strong_thr).sum())
+    ss  = int((cp >= super_thr).sum())
+    sw  = int((cp <= -super_thr).sum())
+    nu  = int((cp >= limit_thr).sum())
+    nd  = int((cp <= -limit_thr).sum())
+
+    # 紅K / 黑K（需要 open_price）
+    rk = bk = fk = None
+    if 'open_price' in df.columns:
+        op = pd.to_numeric(df['open_price'], errors='coerce')
+        cl = pd.to_numeric(df['close_price'], errors='coerce')
+        valid_mask = op.notna() & cl.notna()
+        if valid_mask.any():
+            rk = int((cl[valid_mask] > op[valid_mask]).sum())
+            bk = int((cl[valid_mask] < op[valid_mask]).sum())
+            fk = int((cl[valid_mask] == op[valid_mask]).sum())
+
+    # 核心指標（公式與 main.py 一致）
+    sentiment = (uc - dc) / (uc + dc) * 100 if (uc + dc) > 0 else 0.0
+    ad        = uc / dc if dc > 0 else None
+    activity  = (sc + wc) / n * 100 if n > 0 else 0.0
+    vol       = float(cp.std(ddof=0)) if len(cp) > 1 else 0.0
+
+    extreme   = cp[(cp >= strong_thr) | (cp <= -strong_thr)]
+    strength  = float(extreme.mean()) if len(extreme) > 0 else 0.0
+
+    # 強勢百 / 弱勢百（排除漲跌停，與 main.py 一致）
+    filtered_cp = cp[cp.abs() <= 10.01]
+    top_avg    = float(filtered_cp.nlargest(top_n).mean())  if len(filtered_cp) >= top_n else None
+    bottom_avg = float(filtered_cp.nsmallest(top_n).mean()) if len(filtered_cp) >= top_n else None
+
+    return {
+        'filtered_total':       n,
+        'up_count':             uc,
+        'down_count':           dc,
+        'flat_count':           fc,
+        'red_k_count':          rk,
+        'black_k_count':        bk,
+        'flat_k_count':         fk,
+        'strong_count':         sc,
+        'weak_count':           wc,
+        'super_strong_count':   ss,
+        'super_weak_count':     sw,
+        'near_limit_up_count':  nu,
+        'near_limit_down_count':nd,
+        'sentiment_index':      sentiment,
+        'ad_ratio':             ad,
+        'activity_rate':        activity,
+        'volatility':           vol,
+        'strength_index':       strength,
+        'top_n_avg':            top_avg,
+        'bottom_n_avg':         bottom_avg,
+    }
+
 
 @st.cache_data(ttl=3600)
 def load_stock_names():
@@ -477,7 +618,7 @@ def load_latest_snapshot(vol_filter=0):
     conn = open_db()
     try:
         df = read_sql("""
-            SELECT symbol, name, market, change_percent, close_price,
+            SELECT symbol, name, market, change_percent, close_price, open_price,
                    trade_volume, trade_value
             FROM raw_snapshots
             WHERE id IN (
@@ -1290,7 +1431,7 @@ def main():
     if db_error:
         st.warning(db_error)
         st.caption("請確認 DATABASE_URL 環境變數已設定，且 PostgreSQL 服務正常運行。")
-        st.info("請先執行 /mnt/c/Users/User/Desktop/FB-Market/main.py 建立資料庫並寫入盤中快照。")
+        st.info("請先執行 main.py 建立資料庫並寫入盤中快照。")
         st.stop()
 
     settings_error = st.session_state.get(SETTINGS_ERROR_KEY)
@@ -1599,7 +1740,9 @@ def data_section_upper():
 
     stime = stats.get('snapshot_time', '')
     date_str = stime[:10]
-    filtered_total = stats.get('filtered_total', 0) or 0
+    # 即時計算受設定影響的指標（B2 修復）
+    live = compute_live_stats(snapshot_df, _settings)
+    filtered_total = live.get('filtered_total', 0) or 0
     freshness_warning = get_daily_stocks_freshness_warning(datetime.now())
     try:
         raw_total = load_total_stock_count()
@@ -1646,13 +1789,13 @@ def data_section_upper():
 
     # --- 面板1: 市場數據總覽（全部指標）---
     with p1:
-        sentiment = stats.get('sentiment_index', 0) or 0
-        ad = stats.get('ad_ratio')
-        activity = stats.get('activity_rate', 0) or 0
-        vol = stats.get('volatility', 0) or 0
-        strength = stats.get('strength_index', 0) or 0
-        top_avg = stats.get('top_n_avg')
-        bottom_avg = stats.get('bottom_n_avg')
+        sentiment  = live.get('sentiment_index', 0) or 0
+        ad         = live.get('ad_ratio')
+        activity   = live.get('activity_rate', 0) or 0
+        vol        = live.get('volatility', 0) or 0
+        strength   = live.get('strength_index', 0) or 0
+        top_avg    = live.get('top_n_avg')
+        bottom_avg = live.get('bottom_n_avg')
         prev_count = stats.get('prev_strong_count')
         prev_avg = stats.get('prev_strong_avg_today')
         prev_rate = stats.get('prev_strong_positive_rate')
@@ -1844,19 +1987,20 @@ def data_section_upper():
 
     # --- 面板2: 市場家數統計監控 ---
     with p2:
-        uc = stats.get('up_count', 0) or 0
-        dc = stats.get('down_count', 0) or 0
-        fc = stats.get('flat_count', 0) or 0
-        rk = stats.get('red_k_count', 0) or 0
-        bk = stats.get('black_k_count', 0) or 0
-        fk = stats.get('flat_k_count', 0) or 0
+        uc = live.get('up_count', 0) or 0
+        dc = live.get('down_count', 0) or 0
+        fc = live.get('flat_count', 0) or 0
+        # 紅K/黑K：live 有算（有 open_price）；fallback 用 stats
+        rk = live.get('red_k_count') if live.get('red_k_count') is not None else (stats.get('red_k_count', 0) or 0)
+        bk = live.get('black_k_count') if live.get('black_k_count') is not None else (stats.get('black_k_count', 0) or 0)
+        fk = live.get('flat_k_count') if live.get('flat_k_count') is not None else (stats.get('flat_k_count', 0) or 0)
         rk_diff = rk - bk
-        ss = stats.get('super_strong_count', 0) or 0
-        sw = stats.get('super_weak_count', 0) or 0
-        sc = stats.get('strong_count', 0) or 0
-        wc = stats.get('weak_count', 0) or 0
-        nu = stats.get('near_limit_up_count', 0) or 0
-        nd = stats.get('near_limit_down_count', 0) or 0
+        ss = live.get('super_strong_count', 0) or 0
+        sw = live.get('super_weak_count', 0) or 0
+        sc = live.get('strong_count', 0) or 0
+        wc = live.get('weak_count', 0) or 0
+        nu = live.get('near_limit_up_count', 0) or 0
+        nd = live.get('near_limit_down_count', 0) or 0
         limit_thr = _settings.get('limit_threshold', 9.5)
         strong_thr = _settings.get('indicator_strong', 3)
         super_strong_thr = _settings.get('indicator_super_strong', 7.5)

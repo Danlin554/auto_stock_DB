@@ -37,8 +37,11 @@ from postmarket_sync import sync_date as sync_daily
 SETTINGS_PATH = os.path.join(BASE_DIR, 'config', 'settings.json')
 BLUE_CHIPS_PATH = os.path.join(BASE_DIR, 'config', 'blue_chips.csv')
 
-with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
-    SETTINGS = json.load(f)
+try:
+    with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+        SETTINGS = json.load(f)
+except Exception:
+    SETTINGS = {}
 
 # === 常數設定 ===
 LOG_DIR = os.path.join(BASE_DIR, 'log')
@@ -469,9 +472,11 @@ def sdk_login(logger):
     sdk = FubonSDK()
 
     cert_b64 = os.environ.get('FUBON_CERT_B64')
+    _tmp_cert = None
     if cert_b64:
         import base64, tempfile
         fd, cert_path = tempfile.mkstemp(suffix='.pfx')
+        _tmp_cert = cert_path
         with os.fdopen(fd, 'wb') as f:
             f.write(base64.b64decode(cert_b64))
         logger.info("使用 FUBON_CERT_B64 環境變數憑證")
@@ -485,6 +490,13 @@ def sdk_login(logger):
     except Exception as e:
         logger.error(f"登入失敗：{e}")
         raise
+    finally:
+        # 立即刪除暫存憑證檔（含私鑰，不應留在 /tmp）
+        if _tmp_cert:
+            try:
+                os.unlink(_tmp_cert)
+            except Exception:
+                pass
 
     sdk.init_realtime()
     logger.info("初始化即時行情完成")

@@ -95,8 +95,10 @@ st.markdown(f"""<style>
 def _load_raw_all():
     try:
         conn = get_connection()
-        df = read_sql("SELECT * FROM daily_closing ORDER BY date ASC", conn)
-        conn.close()
+        try:
+            df = read_sql("SELECT * FROM daily_closing ORDER BY date ASC", conn)
+        finally:
+            conn.close()
         return df
     except Exception as e:
         st.error(f"讀取 daily_closing 失敗：{e}")
@@ -502,10 +504,10 @@ def stat_card(col, label, higher_bullish, decimals, suffix, latest, df_all_col, 
     p75_val = latest.get(f'{col}_p75') if hasattr(latest, 'get') else None
     if p25_val is None:
         try: p25_val = latest[f'{col}_p25']
-        except: pass
+        except (KeyError, TypeError): pass
     if p75_val is None:
         try: p75_val = latest[f'{col}_p75']
-        except: pass
+        except (KeyError, TypeError): pass
 
     range_html = ''
     if p25_val is not None and p75_val is not None and not pd.isna(p25_val) and not pd.isna(p75_val):
@@ -739,7 +741,7 @@ with st.expander("📊 完整統計摘要（中位數 / P25~P75 / P10~P90 / IQR 
             v = _latest_full.get(key) if hasattr(_latest_full, 'get') else None
             if v is None:
                 try: v = _latest_full[key]
-                except: pass
+                except (KeyError, TypeError): pass
             return fmt_val(float(v) / _scale if v is not None and not pd.isna(v) else v,
                            dec, sfx) if v is not None and not pd.isna(v) else 'N/A'
         _stats_rows.append({
@@ -755,7 +757,7 @@ with st.expander("📊 完整統計摘要（中位數 / P25~P75 / P10~P90 / IQR 
         })
     if _stats_rows:
         st.dataframe(pd.DataFrame(_stats_rows), use_container_width=True, hide_index=True)
-    st.caption("統計值基於完整歷史資料（全 1,507 天），使用原始值（非 5MA）計算。"
+    st.caption(f"統計值基於完整歷史資料（全 {len(df_full)} 天），使用原始值（非 5MA）計算。"
                "IQR 上/下界 = Q3±1.5×IQR，超出此範圍屬統計上的極端值。")
 
 # ============================================================
