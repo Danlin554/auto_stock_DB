@@ -1908,7 +1908,7 @@ def data_section_upper():
         low_20d_rate = stats.get('low_20d_negative_rate')
 
         # === 直接從 daily_stocks 即時計算突破股票（覆蓋 computed_stats 的 None 值）===
-        _breakout_syms = load_breakout_symbols(today_str)
+        _breakout_syms = load_breakout_symbols(date_str)
 
         def _calc_breakout(syms, rate_type):
             """計算突破股票的今日均漲跌幅與報酬率"""
