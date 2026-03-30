@@ -189,7 +189,7 @@ def setup_logging():
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    ch = logging.StreamHandler()
+    ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
