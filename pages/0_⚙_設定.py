@@ -27,7 +27,7 @@ st.markdown("""<style>
 </style>""", unsafe_allow_html=True)
 
 st.markdown("<h2 style='margin:0 0 6px; color:#2c3e50;'>⚙ 圖表設定</h2>", unsafe_allow_html=True)
-st.caption("設定會儲存到 `config/chart_settings.json`，重啟後仍然保留。修改後切換到歷史收盤指標頁即可看到效果。")
+st.caption("設定會同時儲存到資料庫（雲端持久化）和 `config/chart_settings.json`，容器重啟後仍然保留。修改後切換到歷史收盤指標頁即可看到效果。")
 
 cfg = load_chart_settings()
 
@@ -137,6 +137,7 @@ with tab_display:
     with col2:
         negative_color  = st.color_picker("負向色（下跌/弱勢）",   pal.get('negative', '#5BAA8A'))
         iqr_color       = st.color_picker("IQR 離群值線顏色",       pal.get('iqr_outlier_color', '#FF6B6B'))
+        p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#F59E0B'))
     with col3:
         sma_colors = pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
         sma_c5  = st.color_picker("均線結構：5MA 色",  sma_colors[0] if len(sma_colors) > 0 else '#F5C26B')
@@ -151,6 +152,7 @@ with tab_display:
   <span style='background:{primary_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>主色</span>
   <span style='background:{positive_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>正向</span>
   <span style='background:{negative_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>負向</span>
+  <span style='background:{p25p75_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P25/P75</span>
   <span style='background:{sma_c5}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>5MA</span>
   <span style='background:{sma_c20}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>20MA</span>
   <span style='background:{sma_c60}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>60MA</span>
@@ -210,6 +212,7 @@ with tab_display:
         cfg['palette']['positive'] = positive_color
         cfg['palette']['negative'] = negative_color
         cfg['palette']['iqr_outlier_color'] = iqr_color
+        cfg['palette']['p25p75_color'] = p25p75_color
         cfg['palette']['sma_colors'] = [sma_c5, sma_c20, sma_c60]
         cfg['table']['show_all_columns'] = show_all_cols
         cfg['table']['height'] = tbl_height
@@ -235,6 +238,6 @@ with tab_display:
 st.markdown("---")
 st.markdown("""
 <p style='color:#bbb; font-size:0.75rem; text-align:center;'>
-設定頁 — 所有設定儲存於 <code>config/chart_settings.json</code>，重啟 Streamlit 後仍然保留。<br>
+設定頁 — 所有設定儲存於資料庫（<code>app_settings</code> 表）及 <code>config/chart_settings.json</code>，雲端容器重啟後仍然保留。<br>
 如果切換到歷史頁後畫面沒有更新，請點歷史頁側邊欄的「🔄 重新整理資料」按鈕。
 </p>""", unsafe_allow_html=True)

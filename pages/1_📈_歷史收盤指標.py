@@ -57,13 +57,162 @@ _SMA_COLS = _pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
 _MED_COL   = _pal.get('median_color', '#F97316')
 _IQR_COL   = _pal.get('iqr_outlier_color', '#EF4444')
 _P5P95_COL = _pal.get('p5p95_color', '#8B5CF6')
-_P25P75_COL = '#F59E0B'   # 琥珀色，P25/P75 四分位線
+_P25P75_COL = _pal.get('p25p75_color', '#F59E0B')
 
 PLOTLY_CONFIG = {
     'scrollZoom': True,
     'displayModeBar': True,
     'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
 }
+
+# ── 指標主清單（唯一來源）───────────────────────────────────
+# 所有指標欄位的完整定義，衍生出 band_cols / CARD_DEFS /
+# display_cols / _DIAG_COLS / FULL_COL_LABELS，新增指標只改這裡。
+# 欄位說明：
+#   label              中文顯示名稱
+#   compute_band       是否計算 rolling 統計帶（P5~P95 / IQR）
+#   check_integrity    是否納入資料完整性診斷
+#   show_card          是否顯示統計摘要卡片（含百分位排名）
+#   higher_is_bullish  數值愈高代表偏多（百分位顏色依據）
+#   decimals           顯示小數位數
+#   suffix             顯示後綴（如 '%'）
+#   signed             是否顯示 +/- 號
+#   show_in_table      是否納入預設資料表格顯示
+INDICATORS = {
+    # ── 特殊 ──
+    'date':                     {'label': '日期',             'show_in_table': True},
+    'filtered_total':           {'label': '篩選總家數'},
+    # ── 漲跌計數 ──
+    'up_count':                 {'label': '上漲',   'compute_band': True, 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 0,
+                                 'show_in_table': True},
+    'down_count':               {'label': '下跌',   'compute_band': True, 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': False, 'decimals': 0,
+                                 'show_in_table': True},
+    'flat_count':               {'label': '持平',   'show_in_table': True},
+    'red_k_count':              {'label': '紅K',    'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 0,
+                                 'show_in_table': True},
+    'black_k_count':            {'label': '黑K',    'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': False, 'decimals': 0,
+                                 'show_in_table': True},
+    'flat_k_count':             {'label': '十字K'},
+    'tse_up_count':             {'label': '上市上漲'},
+    'otc_up_count':             {'label': '上櫃上漲'},
+    # ── 成交量值 ──
+    'total_trade_value':        {'label': '成交金額(億)', 'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 0,
+                                 'show_in_table': True},
+    'total_trade_volume':       {'label': '成交量'},
+    # ── 核心指數 ──
+    'sentiment_index':          {'label': '情緒指數',   'compute_band': True, 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 2,
+                                 'signed': True,   'show_in_table': True},
+    'ad_ratio':                 {'label': '多空比',     'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 2,
+                                 'show_in_table': True},
+    'volatility':               {'label': '波動度',     'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': False, 'decimals': 2,
+                                 'suffix': '%',    'show_in_table': True},
+    'strength_index':           {'label': '強弱勢指數', 'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 2,
+                                 'suffix': '%', 'signed': True, 'show_in_table': True},
+    'activity_rate':            {'label': '活躍度(%)',  'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 1,
+                                 'suffix': '%',    'show_in_table': True},
+    # ── 漲跌幅分佈桶 ──
+    'bucket_up_2_5':            {'label': '漲0-2.5%'},
+    'bucket_up_5':              {'label': '漲2.5-5%'},
+    'bucket_up_7_5':            {'label': '漲5-7.5%'},
+    'bucket_up_above':          {'label': '漲>7.5%'},
+    'bucket_down_2_5':          {'label': '跌0-2.5%'},
+    'bucket_down_5':            {'label': '跌2.5-5%'},
+    'bucket_down_7_5':          {'label': '跌5-7.5%'},
+    'bucket_down_above':        {'label': '跌>7.5%'},
+    # ── 強弱勢計數 ──
+    'advantage_count':          {'label': '優勢股數'},
+    'strong_count':             {'label': '強勢股',    'compute_band': True,
+                                 'higher_is_bullish': True,  'show_in_table': True},
+    'super_strong_count':       {'label': '超強勢',   'compute_band': True,
+                                 'higher_is_bullish': True},
+    'near_limit_up_count':      {'label': '接近漲停', 'compute_band': True,
+                                 'higher_is_bullish': True},
+    'disadvantage_count':       {'label': '劣勢股數'},
+    'weak_count':               {'label': '弱勢股',    'compute_band': True,
+                                 'higher_is_bullish': False, 'show_in_table': True},
+    'super_weak_count':         {'label': '超弱勢',   'compute_band': True,
+                                 'higher_is_bullish': False},
+    'near_limit_down_count':    {'label': '接近跌停', 'compute_band': True,
+                                 'higher_is_bullish': False},
+    # ── 前日強弱勢追蹤 ──
+    'prev_strong_count':        {'label': '前日強勢股數'},
+    'prev_strong_avg_today':    {'label': '前日強勢今漲幅(%)'},
+    'prev_strong_positive_rate':{'label': '前日強勢正報酬率(%)'},
+    'prev_weak_count':          {'label': '前日弱勢股數'},
+    'prev_weak_avg_today':      {'label': '前日弱勢今跌幅(%)'},
+    'prev_weak_negative_rate':  {'label': '前日弱勢負報酬率(%)'},
+    # ── 強弱百均漲幅 ──
+    'top_n_avg':                {'label': '強百(%)',   'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 2,
+                                 'suffix': '%', 'signed': True, 'show_in_table': True},
+    'bottom_n_avg':             {'label': '弱百(%)',   'compute_band': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 2,
+                                 'suffix': '%', 'signed': True, 'show_in_table': True},
+    # ── 權值股 ──
+    'blue_chip_up_count':       {'label': '權值股上漲'},
+    'blue_chip_total':          {'label': '權值股總數'},
+    'blue_chip_avg_change':     {'label': '權值股均漲幅(%)', 'compute_band': True,
+                                 'higher_is_bullish': True},
+    # ── 量能潮汐 ──
+    'volume_tide_up_value':     {'label': '上漲量能'},
+    'volume_tide_down_value':   {'label': '下跌量能'},
+    'volume_tide_net':          {'label': '量能潮汐淨值', 'compute_band': True,
+                                 'higher_is_bullish': True},
+    'volume_tide_up_pct':       {'label': '上漲量能佔比(%)', 'compute_band': True,
+                                 'higher_is_bullish': True},
+    'volume_tide_down_pct':     {'label': '下跌量能佔比(%)'},
+    # ── 漲幅 >5% ──
+    'above_5pct_count':         {'label': '>5%股數',  'compute_band': True,
+                                 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 0,
+                                 'show_in_table': True},
+    # ── 20日創新高/低 ──
+    'new_high_20d_count':       {'label': '20日新高', 'compute_band': True,
+                                 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 0,
+                                 'show_in_table': True},
+    'new_low_20d_count':        {'label': '20日新低', 'compute_band': True,
+                                 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': False, 'decimals': 0,
+                                 'show_in_table': True},
+    # ── 均線結構 ──
+    'above_5ma_count':          {'label': '站穩5MA股數'},
+    'above_20ma_count':         {'label': '站穩20MA股數'},
+    'above_60ma_count':         {'label': '站穩60MA股數'},
+    'above_5ma_pct':            {'label': '站穩5MA%',  'compute_band': True,
+                                 'check_integrity': True, 'higher_is_bullish': True},
+    'above_20ma_pct':           {'label': '站穩20MA%', 'compute_band': True,
+                                 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 1,
+                                 'suffix': '%', 'show_in_table': True},
+    'above_60ma_pct':           {'label': '站穩60MA%', 'compute_band': True,
+                                 'check_integrity': True,
+                                 'show_card': True, 'higher_is_bullish': True,  'decimals': 1,
+                                 'suffix': '%', 'show_in_table': True},
+    # ── 融資 ──
+    'margin_maintenance_rate':  {'label': '融資維持率(%)'},
+}
+
+# ── 從主清單自動產生衍生清單 ────────────────────────────────
+_band_cols = [k for k, v in INDICATORS.items() if v.get('compute_band')]
+FULL_COL_LABELS = {k: v['label'] for k, v in INDICATORS.items()}
+_DIAG_COLS = [k for k, v in INDICATORS.items() if v.get('check_integrity')]
+CARD_DEFS = [
+    (k, v['label'], v.get('higher_is_bullish', True),
+     v.get('decimals', 2), v.get('suffix', ''), v.get('signed', False))
+    for k, v in INDICATORS.items() if v.get('show_card')
+]
+_DEFAULT_TABLE_COLS = [k for k, v in INDICATORS.items() if v.get('show_in_table')]
 
 # ── CSS（字型從設定讀取）────────────────────────────────────
 st.markdown(f"""<style>
@@ -91,7 +240,7 @@ st.markdown(f"""<style>
 
 
 # ── 資料載入 ──────────────────────────────────────────────────
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def _load_raw_all():
     try:
         conn = get_connection()
@@ -105,29 +254,17 @@ def _load_raw_all():
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def compute_bands(lookback: int):
     """計算所有指標的 rolling 統計帶（5MA、P5~P95、IQR 離群值邊界）。"""
     df = _load_raw_all()
     if df.empty:
         return df
 
-    band_cols = [
-        'sentiment_index', 'ad_ratio', 'strength_index', 'volatility',
-        'activity_rate', 'up_count', 'down_count', 'red_k_count',
-        'black_k_count', 'top_n_avg', 'bottom_n_avg', 'total_trade_value',
-        'strong_count', 'weak_count', 'super_strong_count', 'super_weak_count',
-        'near_limit_up_count', 'near_limit_down_count',
-        'above_5pct_count', 'new_high_20d_count', 'new_low_20d_count',
-        'above_5ma_pct', 'above_20ma_pct', 'above_60ma_pct',
-        'volume_tide_net', 'volume_tide_up_pct',
-        'blue_chip_avg_change',
-    ]
-
     min_p = max(30, min(50, lookback // 10))
     result = df.copy()
 
-    for col in band_cols:
+    for col in _band_cols:
         if col not in result.columns:
             continue
         raw = pd.to_numeric(result[col], errors='coerce')
@@ -360,6 +497,18 @@ def make_dual_chart(df_p, col1, label1, col2, label2,
                 hovertemplate=f'{label}中位數: %{{y:{hover_fmt}}}<extra></extra>'
             ))
 
+        # P25/P75 四分位線
+        p25p75r, p25p75g, p25p75b = _hex_rgb(_P25P75_COL)
+        for p_c, p_lbl in [(f'{col}_p75', 'P75'), (f'{col}_p25', 'P25')]:
+            if p_c in df_p.columns:
+                fig.add_trace(go.Scatter(
+                    x=df_p['date'], y=df_p[p_c], mode='lines',
+                    line=dict(color=f'rgba({p25p75r},{p25p75g},{p25p75b},0.7)',
+                              width=1.2, dash='dash'),
+                    legendgroup=grp, name=f'{label} {p_lbl}', showlegend=False,
+                    hovertemplate=f'{label}{p_lbl}: %{{y:{hover_fmt}}}<extra></extra>'
+                ))
+
         # 原始值
         fig.add_trace(go.Scatter(
             x=df_p['date'], y=raw, mode='lines', name=label,
@@ -531,45 +680,6 @@ def stat_card(col, label, higher_bullish, decimals, suffix, latest, df_all_col, 
 
 
 # ============================================================
-#  全欄位標籤對照表
-# ============================================================
-FULL_COL_LABELS = {
-    'date': '日期', 'filtered_total': '篩選總家數',
-    'up_count': '上漲', 'down_count': '下跌', 'flat_count': '持平',
-    'red_k_count': '紅K', 'black_k_count': '黑K', 'flat_k_count': '十字K',
-    'tse_up_count': '上市上漲', 'otc_up_count': '上櫃上漲',
-    'total_trade_value': '成交金額', 'total_trade_volume': '成交量',
-    'sentiment_index': '情緒指數', 'ad_ratio': '多空比',
-    'volatility': '波動度', 'strength_index': '強弱勢指數',
-    'activity_rate': '活躍度(%)',
-    'bucket_up_2_5': '漲0-2.5%', 'bucket_up_5': '漲2.5-5%',
-    'bucket_up_7_5': '漲5-7.5%', 'bucket_up_above': '漲>7.5%',
-    'bucket_down_2_5': '跌0-2.5%', 'bucket_down_5': '跌2.5-5%',
-    'bucket_down_7_5': '跌5-7.5%', 'bucket_down_above': '跌>7.5%',
-    'advantage_count': '優勢股數', 'strong_count': '強勢股',
-    'super_strong_count': '超強勢', 'near_limit_up_count': '接近漲停',
-    'disadvantage_count': '劣勢股數', 'weak_count': '弱勢股',
-    'super_weak_count': '超弱勢', 'near_limit_down_count': '接近跌停',
-    'prev_strong_count': '前日強勢股數', 'prev_strong_avg_today': '前日強勢今漲幅(%)',
-    'prev_strong_positive_rate': '前日強勢正報酬率(%)',
-    'prev_weak_count': '前日弱勢股數', 'prev_weak_avg_today': '前日弱勢今跌幅(%)',
-    'prev_weak_negative_rate': '前日弱勢負報酬率(%)',
-    'top_n_avg': '強百(%)', 'bottom_n_avg': '弱百(%)',
-    'blue_chip_up_count': '權值股上漲', 'blue_chip_total': '權值股總數',
-    'blue_chip_avg_change': '權值股均漲幅(%)',
-    'volume_tide_up_value': '上漲量能', 'volume_tide_down_value': '下跌量能',
-    'volume_tide_net': '量能潮汐淨值', 'volume_tide_up_pct': '上漲量能佔比(%)',
-    'volume_tide_down_pct': '下跌量能佔比(%)',
-    'above_5pct_count': '>5%股數',
-    'new_high_20d_count': '20日新高', 'new_low_20d_count': '20日新低',
-    'above_5ma_count': '站穩5MA股數', 'above_20ma_count': '站穩20MA股數',
-    'above_60ma_count': '站穩60MA股數',
-    'above_5ma_pct': '站穩5MA%', 'above_20ma_pct': '站穩20MA%',
-    'above_60ma_pct': '站穩60MA%',
-    'margin_maintenance_rate': '融資維持率(%)',
-}
-
-# ============================================================
 #  Sidebar 控制項
 # ============================================================
 if 'hist_start' not in st.session_state:
@@ -588,15 +698,15 @@ with st.sidebar:
         if st.button("近30天",  use_container_width=True):
             st.session_state.hist_start = date.today() - timedelta(days=30)
             st.session_state.hist_end   = date.today()
-        if st.button("近100天", use_container_width=True):
-            st.session_state.hist_start = date.today() - timedelta(days=100)
+        if st.button("近3月",   use_container_width=True):
+            st.session_state.hist_start = date.today() - timedelta(days=90)
             st.session_state.hist_end   = date.today()
         if st.button("近1年",   use_container_width=True):
             st.session_state.hist_start = date.today() - timedelta(days=365)
             st.session_state.hist_end   = date.today()
     with c2:
-        if st.button("近3月",   use_container_width=True):
-            st.session_state.hist_start = date.today() - timedelta(days=90)
+        if st.button("近100天", use_container_width=True):
+            st.session_state.hist_start = date.today() - timedelta(days=100)
             st.session_state.hist_end   = date.today()
         if st.button("近180天", use_container_width=True):
             st.session_state.hist_start = date.today() - timedelta(days=180)
@@ -668,11 +778,6 @@ st.caption(
 )
 
 # ── 資料完整性診斷（可展開）────────────────────────────────
-_DIAG_COLS = [
-    'sentiment_index', 'up_count', 'down_count', 'above_5pct_count',
-    'new_high_20d_count', 'new_low_20d_count',
-    'above_5ma_pct', 'above_20ma_pct', 'above_60ma_pct',
-]
 _truncated = []
 for _c in _DIAG_COLS:
     if _c in df_full.columns:
@@ -694,27 +799,6 @@ else:
 # ============================================================
 st.markdown('<div class="section-hdr">📊 今日數值 vs 歷史百分位</div>',
             unsafe_allow_html=True)
-
-CARD_DEFS = [
-    # (col, label, higher_bullish, decimals, suffix, signed)
-    ('sentiment_index',    '情緒指數',     True,  2, '',  True),
-    ('ad_ratio',           '多空比',       True,  2, '',  False),
-    ('strength_index',     '強弱勢指數',   True,  2, '%', True),
-    ('volatility',         '波動度',       False, 2, '%', False),
-    ('activity_rate',      '活躍度',       True,  1, '%', False),
-    ('up_count',           '上漲家數',     True,  0, '',  False),
-    ('down_count',         '下跌家數',     False, 0, '',  False),
-    ('red_k_count',        '紅K家數',      True,  0, '',  False),
-    ('black_k_count',      '黑K家數',      False, 0, '',  False),
-    ('top_n_avg',          '強勢百均漲幅', True,  2, '%', True),
-    ('bottom_n_avg',       '弱勢百均跌幅', True,  2, '%', True),
-    ('total_trade_value',  '成交金額(億)', True,  0, '',  False),
-    ('above_5pct_count',   '漲幅>5%家數',  True,  0, '',  False),
-    ('new_high_20d_count', '20日創新高',   True,  0, '',  False),
-    ('new_low_20d_count',  '20日創新低',   False, 0, '',  False),
-    ('above_20ma_pct',     '站穩20MA',     True,  1, '%', False),
-    ('above_60ma_pct',     '站穩60MA',     True,  1, '%', False),
-]
 
 COLS_PER_ROW = 5
 # 使用含統計帶欄位的 df_full（compute_bands 結果）做百分位計算
@@ -884,15 +968,7 @@ if _tbl.get('show_all_columns', False):
                 if not any(c.endswith(s) for s in _BAND_SFXS) and c != 'id']
     display_cols = _all_raw
 else:
-    display_cols = [
-        'date', 'sentiment_index', 'ad_ratio', 'volatility', 'strength_index',
-        'activity_rate', 'up_count', 'down_count', 'flat_count',
-        'red_k_count', 'black_k_count', 'top_n_avg', 'bottom_n_avg',
-        'strong_count', 'weak_count', 'above_5pct_count',
-        'new_high_20d_count', 'new_low_20d_count',
-        'above_20ma_pct', 'above_60ma_pct',
-        'total_trade_value',
-    ]
+    display_cols = [c for c in _DEFAULT_TABLE_COLS if c in df.columns]
 
 tbl_cols = [c for c in display_cols if c in df.columns]
 
@@ -927,6 +1003,14 @@ st.dataframe(
     df_table.style.format(_fmt, na_rep='N/A'),
     use_container_width=True,
     height=int(_tbl.get('height', 480)),
+)
+
+csv_bytes = df_table.to_csv(index=False).encode('utf-8-sig')
+st.download_button(
+    label="📥 下載 CSV",
+    data=csv_bytes,
+    file_name=f"daily_closing_{start_str}_{end_str}.csv",
+    mime='text/csv',
 )
 
 # ── 頁尾 ──────────────────────────────────────────────────
