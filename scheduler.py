@@ -14,6 +14,7 @@ import sys
 import signal
 import subprocess
 import logging
+import threading
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -56,6 +57,46 @@ def run_script(script_name, args=None, allow_segfault=False):
             logger.error(f"{script_name} 異常結束 (exit {code})")
     except Exception as e:
         logger.error(f"執行 {script_name} 發生例外：{e}")
+
+
+def check_and_recover():
+    """
+    服務啟動時的補救機制：
+    若目前處於開盤時間（08:50~13:35）且今天 DB 尚無快照資料，立即補跑 main.py。
+    以獨立執行緒執行，不阻塞排程器啟動。
+    """
+    now = datetime.now()
+
+    # 只在週一到週五
+    if now.weekday() >= 5:
+        logger.info("[補救] 今天是週末，略過補救檢查")
+        return
+
+    # 只在開盤時間內
+    market_start = now.replace(hour=8, minute=50, second=0, microsecond=0)
+    market_end   = now.replace(hour=13, minute=35, second=0, microsecond=0)
+    if not (market_start <= now <= market_end):
+        logger.info(f"[補救] 目前時間 {now.strftime('%H:%M')} 不在開盤時段，略過補救檢查")
+        return
+
+    # 檢查今天是否已有快照資料
+    try:
+        sys.path.insert(0, BASE_DIR)
+        from lib.db import get_connection, qone
+        conn = get_connection()
+        today_str = now.strftime('%Y-%m-%d')
+        row = qone(conn, "SELECT COUNT(*) FROM raw_snapshots WHERE snapshot_time >= %s", (today_str,))
+        conn.close()
+        count = row[0] if row else 0
+        if count > 0:
+            logger.info(f"[補救] 今天已有 {count} 筆快照資料，無需補跑")
+            return
+    except Exception as e:
+        logger.error(f"[補救] 檢查今日快照資料失敗：{e}，跳過補救")
+        return
+
+    logger.info("[補救] 開盤中但今天無資料，立即補跑 main.py...")
+    run_script('main.py', allow_segfault=True)
 
 
 def job_main():
@@ -111,6 +152,10 @@ def main():
         logger.info(f"排程任務：{job.name} (id={job.id})")
 
     logger.info("排程服務已啟動，等待任務觸發...")
+
+    # 啟動時補救：若在開盤時間且今天無資料，立即補跑
+    t = threading.Thread(target=check_and_recover, daemon=True)
+    t.start()
 
     # 優雅關閉
     def shutdown(signum, frame):
