@@ -24,7 +24,7 @@ try:
     _FUBON_PWD       = os.environ.get('FUBON_PWD')       or _cfg.FUBON_PWD
     _FUBON_CERT_PATH = os.environ.get('FUBON_CERT_PATH') or _cfg.FUBON_CERT_PATH
     _FUBON_CERT_PWD  = os.environ.get('FUBON_CERT_PWD')  or _cfg.FUBON_CERT_PWD
-except ImportError:
+except (ImportError, AttributeError):
     _FUBON_ID        = os.environ['FUBON_ID']
     _FUBON_PWD       = os.environ['FUBON_PWD']
     _FUBON_CERT_PATH = os.environ.get('FUBON_CERT_PATH', '')
