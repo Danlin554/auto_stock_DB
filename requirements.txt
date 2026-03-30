@@ -24,4 +24,4 @@ orjson==3.10.12
 pytz==2024.2
 
 # 富邦 SDK 依賴（fubon_neo 本身需手動安裝）
-fugle-marketdata==2.1.0
+fugle-marketdata>=2.4.1
