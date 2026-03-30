@@ -498,8 +498,10 @@ def sdk_login(logger):
         logger.info(f"使用本機憑證：{cert_path}")
 
     try:
-        sdk.login(_FUBON_ID, _FUBON_PWD, cert_path, _FUBON_CERT_PWD)
-        logger.info("登入富邦 API 成功")
+        result = sdk.login(_FUBON_ID, _FUBON_PWD, cert_path, _FUBON_CERT_PWD)
+        if not result.is_success:
+            raise RuntimeError(f"登入失敗：{result.message}")
+        logger.info(f"登入富邦 API 成功：帳號={[a.account for a in (result.data or [])]}")
     except Exception as e:
         logger.error(f"登入失敗：{e}")
         raise
