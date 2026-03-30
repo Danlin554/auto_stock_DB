@@ -132,12 +132,14 @@ with tab_display:
     pal = cfg['palette']
     col1, col2, col3 = st.columns(3)
     with col1:
-        primary_color  = st.color_picker("主色（單指標圖）",   pal.get('primary', '#4A90D9'))
+        primary_color  = st.color_picker("主色（單指標圖）",   pal.get('primary', '#6366F1'))
         positive_color = st.color_picker("正向色（上漲/強勢）", pal.get('positive', '#E8756C'))
+        median_color   = st.color_picker("中位數線顏色",        pal.get('median_color', '#64748B'))
     with col2:
         negative_color  = st.color_picker("負向色（下跌/弱勢）",   pal.get('negative', '#5BAA8A'))
-        iqr_color       = st.color_picker("IQR 離群值線顏色",       pal.get('iqr_outlier_color', '#FF6B6B'))
-        p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#F59E0B'))
+        iqr_color       = st.color_picker("IQR 離群值線顏色",       pal.get('iqr_outlier_color', '#F43F5E'))
+        p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#94A3B8'))
+        p5p95_color     = st.color_picker("P5/P95 極端線顏色",      pal.get('p5p95_color', '#CBD5E1'))
     with col3:
         sma_colors = pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
         sma_c5  = st.color_picker("均線結構：5MA 色",  sma_colors[0] if len(sma_colors) > 0 else '#F5C26B')
@@ -152,7 +154,10 @@ with tab_display:
   <span style='background:{primary_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>主色</span>
   <span style='background:{positive_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>正向</span>
   <span style='background:{negative_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>負向</span>
+  <span style='background:{median_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>中位數</span>
   <span style='background:{p25p75_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P25/P75</span>
+  <span style='background:{p5p95_color}; color:#333; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P5/P95</span>
+  <span style='background:{iqr_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>IQR</span>
   <span style='background:{sma_c5}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>5MA</span>
   <span style='background:{sma_c20}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>20MA</span>
   <span style='background:{sma_c60}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>60MA</span>
@@ -211,8 +216,10 @@ with tab_display:
         cfg['palette']['primary'] = primary_color
         cfg['palette']['positive'] = positive_color
         cfg['palette']['negative'] = negative_color
+        cfg['palette']['median_color'] = median_color
         cfg['palette']['iqr_outlier_color'] = iqr_color
         cfg['palette']['p25p75_color'] = p25p75_color
+        cfg['palette']['p5p95_color'] = p5p95_color
         cfg['palette']['sma_colors'] = [sma_c5, sma_c20, sma_c60]
         cfg['table']['show_all_columns'] = show_all_cols
         cfg['table']['height'] = tbl_height

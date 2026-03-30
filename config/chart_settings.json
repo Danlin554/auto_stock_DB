@@ -19,17 +19,18 @@
         "show_iqr_outlier": true
     },
     "palette": {
-        "primary": "#3B82C4",
+        "primary": "#6366F1",
         "positive": "#E07050",
         "negative": "#4CAF8A",
-        "p5p95_color": "#8B5CF6",
+        "p5p95_color": "#CBD5E1",
         "sma_colors": [
-            "#E8A838",
-            "#3B82C4",
-            "#8B72BE"
+            "#F59E0B",
+            "#06B6D4",
+            "#F97316"
         ],
-        "median_color": "#F97316",
-        "iqr_outlier_color": "#EF4444"
+        "median_color": "#64748B",
+        "iqr_outlier_color": "#F43F5E",
+        "p25p75_color": "#94A3B8"
     },
     "table": {
         "show_all_columns": false,
