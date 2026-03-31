@@ -132,14 +132,14 @@ with tab_display:
     pal = cfg['palette']
     col1, col2, col3 = st.columns(3)
     with col1:
-        primary_color  = st.color_picker("主色（單指標圖）",   pal.get('primary', '#6366F1'))
-        positive_color = st.color_picker("正向色（上漲/強勢）", pal.get('positive', '#E8756C'))
-        median_color   = st.color_picker("中位數線顏色",        pal.get('median_color', '#64748B'))
+        primary_color  = st.color_picker("主色（單指標圖）",   pal.get('primary', '#DC2626'))
+        positive_color = st.color_picker("正向色（上漲/強勢）", pal.get('positive', '#FB923C'))
+        median_color   = st.color_picker("中位數線顏色",        pal.get('median_color', '#B8C4CE'))
     with col2:
-        negative_color  = st.color_picker("負向色（下跌/弱勢）",   pal.get('negative', '#5BAA8A'))
+        negative_color  = st.color_picker("負向色（下跌/弱勢）",   pal.get('negative', '#4ADE80'))
         iqr_color       = st.color_picker("IQR 離群值線顏色",       pal.get('iqr_outlier_color', '#F43F5E'))
-        p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#94A3B8'))
-        p5p95_color     = st.color_picker("P5/P95 極端線顏色",      pal.get('p5p95_color', '#CBD5E1'))
+        p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#7B8FA2'))
+        p5p95_color     = st.color_picker("P10/P90 極端線顏色",     pal.get('p5p95_color', '#3D5A73'))
     with col3:
         sma_colors = pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
         sma_c5  = st.color_picker("均線結構：5MA 色",  sma_colors[0] if len(sma_colors) > 0 else '#F5C26B')

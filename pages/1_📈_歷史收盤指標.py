@@ -58,6 +58,10 @@ _MED_COL   = _pal.get('median_color', '#F97316')
 _IQR_COL   = _pal.get('iqr_outlier_color', '#EF4444')
 _P5P95_COL = _pal.get('p5p95_color', '#8B5CF6')
 _P25P75_COL = _pal.get('p25p75_color', '#F59E0B')
+_BULL_AREA   = _pal.get('bull_area',   'rgba(251,146,60,0.25)')
+_BEAR_AREA   = _pal.get('bear_area',   'rgba(74,222,128,0.22)')
+_BULL_LINE   = _pal.get('bull_line',   '#DC2626')
+_BEAR_LINE   = _pal.get('bear_line',   '#15803D')
 
 PLOTLY_CONFIG = {
     'scrollZoom': True,
@@ -269,13 +273,11 @@ def compute_bands(lookback: int):
             continue
         raw = pd.to_numeric(result[col], errors='coerce')
         result[f'{col}_ma5'] = raw.rolling(5, min_periods=1).mean()
-        result[f'{col}_p5']  = raw.rolling(lookback, min_periods=min_p).quantile(0.05)
         result[f'{col}_p10'] = raw.rolling(lookback, min_periods=min_p).quantile(0.10)
         result[f'{col}_p25'] = raw.rolling(lookback, min_periods=min_p).quantile(0.25)
         result[f'{col}_p50'] = raw.rolling(lookback, min_periods=min_p).quantile(0.50)
         result[f'{col}_p75'] = raw.rolling(lookback, min_periods=min_p).quantile(0.75)
         result[f'{col}_p90'] = raw.rolling(lookback, min_periods=min_p).quantile(0.90)
-        result[f'{col}_p95'] = raw.rolling(lookback, min_periods=min_p).quantile(0.95)
         # IQR 離群值邊界（不需額外 rolling，基於 P25/P75 加減）
         iqr = result[f'{col}_p75'] - result[f'{col}_p25']
         result[f'{col}_iqr_upper'] = result[f'{col}_p75'] + 1.5 * iqr
@@ -312,6 +314,98 @@ def rank_badge(pct, higher_is_bullish=True):
         elif pct >= 10: cls, lbl = 'rank-high',         f'偏多({pct:.0f}%)'
         else:           cls, lbl = 'rank-extreme-high', f'極端偏多({pct:.0f}%)'
     return f'<span class="rank-badge {cls}">{lbl}</span>'
+
+
+# ── 六層位階系統 ─────────────────────────────────────────────
+_ZONE_DEFS = [
+    ('extreme_bull', '極度偏多', '⬆⬆', '#DC2626'),
+    ('bull',         '偏多',     '⬆',   '#F97316'),
+    ('mild_bull',    '中性偏多', '↗',   '#FCD34D'),
+    ('mild_bear',    '中性偏空', '↘',   '#D1FAE5'),
+    ('bear',         '偏空',     '⬇',   '#34D399'),
+    ('extreme_bear', '極度偏空', '⬇⬇', '#064E3B'),
+]
+_ZONE_MAP = {k: (lbl, arrow, color) for k, lbl, arrow, color in _ZONE_DEFS}
+_ZONE_WEIGHTS = {
+    'extreme_bull': +3, 'bull': +2, 'mild_bull': +1,
+    'mild_bear': -1,    'bear': -2, 'extreme_bear': -3,
+}
+_WD_MAP = {0: '一', 1: '二', 2: '三', 3: '四', 4: '五', 5: '六', 6: '日'}
+
+
+def classify_zone(value, p10, p25, p50, p75, p90, higher_is_bullish=True):
+    """依 5MA 位置分類六層位階，回傳 (key, label, arrow, color)。"""
+    if any(pd.isna(v) for v in [value, p10, p25, p50, p75, p90]):
+        return None, '未知', '—', '#cccccc'
+    if higher_is_bullish:
+        if value >= p90:   key = 'extreme_bull'
+        elif value >= p75: key = 'bull'
+        elif value >= p50: key = 'mild_bull'
+        elif value >= p25: key = 'mild_bear'
+        elif value >= p10: key = 'bear'
+        else:              key = 'extreme_bear'
+    else:
+        if value >= p90:   key = 'extreme_bear'
+        elif value >= p75: key = 'bear'
+        elif value >= p50: key = 'mild_bear'
+        elif value >= p25: key = 'mild_bull'
+        elif value >= p10: key = 'bull'
+        else:              key = 'extreme_bull'
+    lbl, arrow, color = _ZONE_MAP[key]
+    return key, lbl, arrow, color
+
+
+def _get_zone_for_row(row, col, higher_is_bullish=True):
+    """從 DataFrame 某行取得位階分類（使用 5MA 對比 rolling 統計帶）。"""
+    def _g(k):
+        v = row.get(k) if hasattr(row, 'get') else None
+        if v is None:
+            try: v = row[k]
+            except (KeyError, TypeError): pass
+        return float(v) if v is not None and not pd.isna(v) else float('nan')
+    return classify_zone(
+        _g(f'{col}_ma5'), _g(f'{col}_p10'), _g(f'{col}_p25'),
+        _g(f'{col}_p50'), _g(f'{col}_p75'), _g(f'{col}_p90'), higher_is_bullish
+    )
+
+
+def _add_zone_triangles(fig, df_p, col, higher_is_bullish=True):
+    """在圖表底部加三角形位階指示器（每天一個，大小與實/空心區分強弱）。"""
+    if col not in df_p.columns:
+        return
+    raw = pd.to_numeric(df_p[col], errors='coerce')
+    valid = raw.dropna()
+    if valid.empty:
+        return
+    y_min, y_max = valid.min(), valid.max()
+    y_range = max(abs(y_max - y_min), abs(y_min) * 0.01, 1e-6)
+    tri_y = y_min - y_range * 0.12
+
+    _sym_map = {
+        'extreme_bull': ('triangle-up',        10),
+        'bull':         ('triangle-up',          8),
+        'mild_bull':    ('triangle-up-open',     6),
+        'mild_bear':    ('triangle-down-open',   6),
+        'bear':         ('triangle-down',         8),
+        'extreme_bear': ('triangle-down',        10),
+    }
+    xs, ys, colors, symbols, sizes, texts = [], [], [], [], [], []
+    for _, row in df_p.iterrows():
+        zk, zl, za, zc = _get_zone_for_row(row, col, higher_is_bullish)
+        if zk is None:
+            continue
+        sym, sz = _sym_map[zk]
+        xs.append(row['date']); ys.append(tri_y)
+        colors.append(zc); symbols.append(sym); sizes.append(sz)
+        texts.append(f'{za} {zl}')
+
+    if xs:
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode='markers', showlegend=False,
+            marker=dict(symbol=symbols, size=sizes, color=colors,
+                        line=dict(width=0.5, color='rgba(0,0,0,0.25)')),
+            hovertemplate='%{text}<extra></extra>', text=texts, name='位階',
+        ))
 
 
 def fmt_val(v, decimals=2, suffix='', signed=False):
@@ -361,7 +455,7 @@ def _base_layout(title, height=None, zero_line=False, y_suffix='', yrange=None):
         plot_bgcolor='white', paper_bgcolor='white',
         xaxis=dict(
             tickfont=dict(size=_TICK_SZ), tickangle=-30,
-            showgrid=False, fixedrange=False,
+            showgrid=False, fixedrange=False, tickformat='%Y/%m/%d',
             rangeselector=dict(
                 buttons=[
                     dict(count=100, label="100天", step="day", stepmode="backward"),
@@ -391,19 +485,29 @@ def _base_layout(title, height=None, zero_line=False, y_suffix='', yrange=None):
 
 
 def make_chart(df_p, col, label, height=None, zero_line=False,
-               hover_fmt='.2f', y_suffix='', color=None):
-    """單指標圖：原始值 + 5MA + rolling 統計帶 + IQR 線"""
+               hover_fmt='.2f', y_suffix='', color=None, higher_is_bullish=None):
+    """單指標面積圖：原始值（面積填充）+ 5MA 主線 + rolling 統計帶 + 位階三角形"""
     if col not in df_p.columns:
         return None
-    clr = color or _PRIMARY
+    hib = higher_is_bullish if higher_is_bullish is not None else INDICATORS.get(col, {}).get('higher_is_bullish', True)
+    if color:
+        r, g, b = _hex_rgb(color)
+        band_clr = color
+        area_fill = f'rgba({r},{g},{b},0.15)'
+        ma5_clr = color
+    else:
+        band_clr = _POS if hib else _NEG
+        area_fill = _BULL_AREA if hib else _BEAR_AREA
+        ma5_clr = _BULL_LINE if hib else _BEAR_LINE
+    r, g, b = _hex_rgb(band_clr)
+
     raw = pd.to_numeric(df_p[col], errors='coerce')
     ma5 = df_p.get(f'{col}_ma5', raw)
-    r, g, b = _hex_rgb(clr)
 
     fig = go.Figure()
-    _add_band(fig, df_p, col, clr)
+    _add_band(fig, df_p, col, band_clr)
 
-    # 中位數虛線（加粗）
+    # 中位數虛線
     if _SHOW_MED and f'{col}_p50' in df_p.columns:
         fig.add_trace(go.Scatter(
             x=df_p['date'], y=df_p[f'{col}_p50'], mode='lines',
@@ -412,7 +516,7 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
             hovertemplate=f'中位數(P50): %{{y:{hover_fmt}}}<extra></extra>'
         ))
 
-    # P25/P75 四分位線（琥珀色）
+    # P25/P75 四分位線
     p25p75r, p25p75g, p25p75b = _hex_rgb(_P25P75_COL)
     for p_c, p_lbl in [(f'{col}_p75', 'P75'), (f'{col}_p25', 'P25')]:
         if p_c in df_p.columns:
@@ -423,10 +527,10 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
                 hovertemplate=f'{p_lbl}: %{{y:{hover_fmt}}}<extra></extra>'
             ))
 
-    # P95/P5 極端分位線（紫色）
+    # P90/P10 極端分位線
     if _SHOW_P5P95:
         pr, pg, pb = _hex_rgb(_P5P95_COL)
-        for p_c, p_lbl in [(f'{col}_p95', 'P95'), (f'{col}_p5', 'P5')]:
+        for p_c, p_lbl in [(f'{col}_p90', 'P90'), (f'{col}_p10', 'P10')]:
             if p_c in df_p.columns:
                 fig.add_trace(go.Scatter(
                     x=df_p['date'], y=df_p[p_c], mode='lines',
@@ -435,7 +539,7 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
                     hovertemplate=f'{p_lbl}: %{{y:{hover_fmt}}}<extra></extra>'
                 ))
 
-    # IQR 上界（多方警戒線，紅色）
+    # IQR 上界
     if _SHOW_IQR and f'{col}_iqr_upper' in df_p.columns:
         fig.add_trace(go.Scatter(
             x=df_p['date'], y=df_p[f'{col}_iqr_upper'], mode='lines',
@@ -444,9 +548,10 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
             hovertemplate=f'IQR上界: %{{y:{hover_fmt}}}<extra></extra>'
         ))
 
-    # 原始值（半透明細線）
+    # 原始值（面積圖：線 + 下方填充）
     fig.add_trace(go.Scatter(
         x=df_p['date'], y=raw, mode='lines', name=label,
+        fill='tozeroy', fillcolor=area_fill,
         line=dict(color=f'rgba({r},{g},{b},{_RAW_ALPHA})', width=_LW_RAW),
         hovertemplate=f'{label}: %{{y:{hover_fmt}}}<extra></extra>'
     ))
@@ -454,9 +559,12 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
     # 5MA 主線
     fig.add_trace(go.Scatter(
         x=df_p['date'], y=ma5, mode='lines', name=f'{label} 5MA',
-        line=dict(color=clr, width=_LW_MA5),
+        line=dict(color=ma5_clr, width=_LW_MA5),
         hovertemplate=f'5MA: %{{y:{hover_fmt}}}<extra></extra>'
     ))
+
+    # 位階三角形指示器
+    _add_zone_triangles(fig, df_p, col, hib)
 
     if zero_line:
         fig.add_hline(y=0, line_color='#ccc', line_width=1)
@@ -469,26 +577,32 @@ def make_dual_chart(df_p, col1, label1, col2, label2,
                     height=None, zero_line=False, hover_fmt='.0f',
                     color1=None, color2=None):
     """
-    雙線圖：兩指標各自有原始值 + 5MA + 統計帶。
-    使用 legendgroup 支援點擊隔離（點圖例可只看單指標）。
+    雙指標面積圖：各自有原始值（面積填充）+ 5MA + 統計帶 + 位階三角形。
+    使用 legendgroup 支援點擊隔離。
     """
-    clr1 = color1 or _POS
-    clr2 = color2 or _NEG
     fig = go.Figure()
 
-    for col, label, clr in [(col1, label1, clr1), (col2, label2, clr2)]:
+    for col, label, clr_override in [(col1, label1, color1), (col2, label2, color2)]:
         if col not in df_p.columns:
             continue
-        raw = pd.to_numeric(df_p[col], errors='coerce')
-        ma5 = df_p.get(f'{col}_ma5', raw)
-        r, g, b = _hex_rgb(clr)
+        hib = INDICATORS.get(col, {}).get('higher_is_bullish', True)
+        if clr_override:
+            r, g, b = _hex_rgb(clr_override)
+            band_clr = clr_override
+            area_fill = f'rgba({r},{g},{b},0.15)'
+            ma5_clr = clr_override
+        else:
+            band_clr = _POS if hib else _NEG
+            area_fill = _BULL_AREA if hib else _BEAR_AREA
+            ma5_clr = _BULL_LINE if hib else _BEAR_LINE
+        r, g, b = _hex_rgb(band_clr)
         grp = f'grp_{col}'
 
-        # 統計帶（預設極低 alpha，隔離後才明顯）
-        _add_band(fig, df_p, col, clr, legendgroup=grp,
+        # 統計帶
+        _add_band(fig, df_p, col, band_clr, legendgroup=grp,
                   outer_alpha=_BAND_OUTER * 0.5, inner_alpha=_BAND_INNER * 0.5)
 
-        # 中位數（加粗）
+        # 中位數
         if _SHOW_MED and f'{col}_p50' in df_p.columns:
             fig.add_trace(go.Scatter(
                 x=df_p['date'], y=df_p[f'{col}_p50'], mode='lines',
@@ -509,9 +623,13 @@ def make_dual_chart(df_p, col1, label1, col2, label2,
                     hovertemplate=f'{label}{p_lbl}: %{{y:{hover_fmt}}}<extra></extra>'
                 ))
 
-        # 原始值
+        raw = pd.to_numeric(df_p[col], errors='coerce')
+        ma5 = df_p.get(f'{col}_ma5', raw)
+
+        # 原始值（面積圖）
         fig.add_trace(go.Scatter(
             x=df_p['date'], y=raw, mode='lines', name=label,
+            fill='tozeroy', fillcolor=area_fill,
             line=dict(color=f'rgba({r},{g},{b},{_RAW_ALPHA})', width=_LW_RAW),
             legendgroup=grp, legendgrouptitle=dict(text=''),
             hovertemplate=f'{label}: %{{y:{hover_fmt}}}<extra></extra>'
@@ -520,10 +638,13 @@ def make_dual_chart(df_p, col1, label1, col2, label2,
         # 5MA
         fig.add_trace(go.Scatter(
             x=df_p['date'], y=ma5, mode='lines', name=f'{label} 5MA',
-            line=dict(color=clr, width=_LW_MA5),
+            line=dict(color=ma5_clr, width=_LW_MA5),
             legendgroup=grp,
             hovertemplate=f'{label}5MA: %{{y:{hover_fmt}}}<extra></extra>'
         ))
+
+        # 位階三角形
+        _add_zone_triangles(fig, df_p, col, hib)
 
     if zero_line:
         fig.add_hline(y=0, line_color='#ccc', line_width=1)
@@ -648,6 +769,29 @@ def stat_card(col, label, higher_bullish, decimals, suffix, latest, df_all_col, 
     badge = rank_badge(pct, higher_bullish)
     val_str = fmt_val(display_val, decimals, suffix, signed)
 
+    # 位階 badge（依 5MA 相對統計帶位置）
+    zone_badge = ''
+    try:
+        def _gbv(suffix_key):
+            v = latest.get(f'{col}{suffix_key}') if hasattr(latest, 'get') else None
+            if v is None:
+                try: v = latest[f'{col}{suffix_key}']
+                except (KeyError, TypeError): pass
+            return float(v) if v is not None and not pd.isna(v) else float('nan')
+        z_ma5 = _gbv('_ma5')
+        if not pd.isna(z_ma5):
+            zk, zl, za, zc = classify_zone(
+                z_ma5, _gbv('_p10'), _gbv('_p25'), _gbv('_p50'), _gbv('_p75'), _gbv('_p90'),
+                higher_bullish
+            )
+            if zk is not None:
+                ztxt = '#064E3B' if zc == '#D1FAE5' else ('#2c3e50' if zc == '#FCD34D' else '#fff')
+                zone_badge = (f'<span style="display:inline-block; background:{zc}; color:{ztxt}; '
+                              f'padding:2px 7px; border-radius:12px; font-size:0.72rem; '
+                              f'font-weight:700; margin-bottom:2px;">{za} {zl}</span><br>')
+    except Exception:
+        pass
+
     # P25-P75 區間
     p25_val = latest.get(f'{col}_p25') if hasattr(latest, 'get') else None
     p75_val = latest.get(f'{col}_p75') if hasattr(latest, 'get') else None
@@ -673,7 +817,7 @@ def stat_card(col, label, higher_bullish, decimals, suffix, latest, df_all_col, 
         f'<div class="stat-card">'
         f'<div class="stat-val">{val_str}</div>'
         f'<div class="stat-lbl">{label}</div>'
-        f'<div class="stat-sub">{badge}</div>'
+        f'<div class="stat-sub">{zone_badge}{badge}</div>'
         f'{range_html}'
         f'</div>', unsafe_allow_html=True
     )
@@ -795,6 +939,78 @@ else:
     pass  # 正常情況不顯示任何提示
 
 # ============================================================
+#  市場整體狀態彙總 Banner
+# ============================================================
+_ov_zone_counts = {k: 0 for k in _ZONE_WEIGHTS}
+_ov_wsum = 0
+_ov_total = 0
+_latest_full_row = df_full.iloc[-1]
+
+for _ov_col, _ov_lbl_card, _ov_hib, _ov_dec, _ov_sfx, _ov_sgn in CARD_DEFS:
+    if _ov_col not in df_full.columns:
+        continue
+    _ovzk, _, _, _ = _get_zone_for_row(_latest_full_row, _ov_col, _ov_hib)
+    if _ovzk is not None:
+        _ov_zone_counts[_ovzk] += 1
+        _ov_wsum += _ZONE_WEIGHTS[_ovzk]
+        _ov_total += 1
+
+if _ov_total > 0:
+    _ov_avg = _ov_wsum / _ov_total
+    if   _ov_avg > 1.5:  _overall_key = 'extreme_bull'
+    elif _ov_avg > 0.5:  _overall_key = 'bull'
+    elif _ov_avg > 0:    _overall_key = 'mild_bull'
+    elif _ov_avg > -0.5: _overall_key = 'mild_bear'
+    elif _ov_avg > -1.5: _overall_key = 'bear'
+    else:                _overall_key = 'extreme_bear'
+else:
+    _overall_key = 'mild_bear'
+
+_ov_lbl_banner, _ov_arrow, _ov_color = _ZONE_MAP[_overall_key]
+_ov_txt = '#064E3B' if _ov_color == '#D1FAE5' else ('#2c3e50' if _ov_color == '#FCD34D' else '#fff')
+
+try:
+    _banner_d = pd.to_datetime(latest_date)
+    _banner_date_str = f"{_banner_d.year}/{_banner_d.month:02d}/{_banner_d.day:02d}（{_WD_MAP[_banner_d.weekday()]}）"
+except Exception:
+    _banner_date_str = str(latest_date)
+
+_pill_defs = [
+    ('extreme_bull', '極偏多', '#DC2626', '#fff'),
+    ('bull',         '偏多',   '#F97316', '#fff'),
+    ('mild_bull',    '中偏多', '#FCD34D', '#2c3e50'),
+    ('mild_bear',    '中偏空', '#D1FAE5', '#064E3B'),
+    ('bear',         '偏空',   '#34D399', '#064E3B'),
+    ('extreme_bear', '極偏空', '#064E3B', '#fff'),
+]
+_pills_html = ''
+for _pk, _ps, _pbg, _pfg in _pill_defs:
+    _pc = _ov_zone_counts.get(_pk, 0)
+    if _pc > 0:
+        _pills_html += (f'<span style="background:{_pbg}; color:{_pfg}; padding:2px 9px; '
+                        f'border-radius:10px; font-size:0.72rem; font-weight:600; margin:2px 3px;">'
+                        f'{_ps} {_pc}</span>')
+
+st.markdown(f"""
+<div style='background:#f8f9fa; border:1px solid #e0e0e0; border-radius:10px;
+            padding:12px 18px; margin-bottom:10px; display:flex;
+            align-items:center; flex-wrap:wrap; gap:14px;'>
+  <div style='font-size:0.80rem; color:#888; min-width:130px;'>
+    📅 {_banner_date_str}<br>
+    <span style='font-size:0.68rem; color:#bbb;'>({_ov_total} 指標納入統計)</span>
+  </div>
+  <div style='display:flex; align-items:center; gap:8px;'>
+    <span style='font-size:0.80rem; color:#666;'>整體市況</span>
+    <span style='background:{_ov_color}; color:{_ov_txt}; padding:5px 16px;
+                border-radius:16px; font-size:0.95rem; font-weight:700;'>{_ov_arrow} {_ov_lbl_banner}</span>
+  </div>
+  <div style='display:flex; flex-wrap:wrap; gap:3px; align-items:center;'>
+    {_pills_html}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ============================================================
 #  統計摘要卡片
 # ============================================================
 st.markdown('<div class="section-hdr">📊 今日數值 vs 歷史百分位</div>',
@@ -844,6 +1060,76 @@ with st.expander("📊 完整統計摘要（中位數 / P25~P75 / P10~P90 / IQR 
     st.caption(f"統計值基於完整歷史資料（全 {len(df_full)} 天），使用原始值（非 5MA）計算。"
                "IQR 上/下界 = Q3±1.5×IQR，超出此範圍屬統計上的極端值。")
 
+# ── 歷史市場狀態總彙 ────────────────────────────────────────
+with st.expander("📅 歷史市場狀態總彙（各日各指標位階）", expanded=False):
+    _hist_n = st.slider("顯示天數", 5, 30, 10, key='hist_zone_days')
+    _hist_rows = df_full.tail(_hist_n + 10)
+    _hist_dates = sorted(_hist_rows['date'].unique())[-_hist_n:]
+    _hist_card_cols = [(c, lb, hb) for c, lb, hb, _, _, _ in CARD_DEFS if c in df_full.columns]
+
+    # 表頭
+    _th_style = "padding:4px 6px; font-size:0.70rem; white-space:nowrap; text-align:center;"
+    _hdr_html = f'<th style="{_th_style} text-align:left;">日期</th>'
+    for _, _hlb, _ in _hist_card_cols:
+        _hdr_html += f'<th style="{_th_style}">{_hlb}</th>'
+    _hdr_html += f'<th style="{_th_style} font-weight:700;">整體</th>'
+
+    # 表格列
+    _tbody_html = ''
+    for _hdate in reversed(_hist_dates):
+        _hdf_row = _hist_rows[_hist_rows['date'] == _hdate]
+        if _hdf_row.empty:
+            continue
+        _hrow = _hdf_row.iloc[0]
+
+        try:
+            _hd_obj = pd.to_datetime(_hdate)
+            _hdate_fmt = f"{_hd_obj.month:02d}/{_hd_obj.day:02d}（{_WD_MAP[_hd_obj.weekday()]}）"
+        except Exception:
+            _hdate_fmt = str(_hdate)[-5:]
+
+        _row_wsum = 0; _row_total = 0
+        _td_cells = f'<td style="padding:4px 8px; font-size:0.75rem; font-weight:600; white-space:nowrap;">{_hdate_fmt}</td>'
+
+        for _hcol, _, _hhib in _hist_card_cols:
+            _hzk, _hzl, _hza, _hzc = _get_zone_for_row(_hrow, _hcol, _hhib)
+            if _hzk is None:
+                _td_cells += '<td style="padding:3px 5px; text-align:center; font-size:0.70rem; color:#ccc;">—</td>'
+            else:
+                _htxt = '#064E3B' if _hzc == '#D1FAE5' else ('#2c3e50' if _hzc == '#FCD34D' else '#fff')
+                _td_cells += (f'<td style="background:{_hzc}; color:{_htxt}; padding:3px 6px; '
+                              f'font-size:0.72rem; text-align:center; border-radius:3px; '
+                              f'white-space:nowrap;">{_hza}</td>')
+                _row_wsum += _ZONE_WEIGHTS[_hzk]; _row_total += 1
+
+        # 整體欄
+        if _row_total > 0:
+            _r_avg = _row_wsum / _row_total
+            if   _r_avg > 1.5:  _rov = 'extreme_bull'
+            elif _r_avg > 0.5:  _rov = 'bull'
+            elif _r_avg > 0:    _rov = 'mild_bull'
+            elif _r_avg > -0.5: _rov = 'mild_bear'
+            elif _r_avg > -1.5: _rov = 'bear'
+            else:               _rov = 'extreme_bear'
+            _rovl, _rova, _rovc = _ZONE_MAP[_rov]
+            _rovtxt = '#064E3B' if _rovc == '#D1FAE5' else ('#2c3e50' if _rovc == '#FCD34D' else '#fff')
+            _td_cells += (f'<td style="background:{_rovc}; color:{_rovtxt}; padding:3px 8px; '
+                          f'font-size:0.78rem; font-weight:700; text-align:center; '
+                          f'border-radius:3px; white-space:nowrap;">{_rova} {_rovl}</td>')
+        else:
+            _td_cells += '<td style="padding:3px 8px; text-align:center; color:#ccc;">—</td>'
+
+        _tbody_html += f'<tr>{_td_cells}</tr>'
+
+    st.markdown(f"""
+<div style="overflow-x:auto; margin-top:8px;">
+<table style="border-collapse:separate; border-spacing:2px 2px; width:100%; font-family:sans-serif;">
+<thead><tr style="background:#f0f4f8;">{_hdr_html}</tr></thead>
+<tbody>{_tbody_html}</tbody>
+</table>
+</div>""", unsafe_allow_html=True)
+    st.caption("位階依各指標 5MA 相對 P10/P25/P50/P75/P90 計算；箭頭方向反映多空傾向。整體欄為加權平均。")
+
 # ============================================================
 #  指標趨勢圖（Tabs 分組）
 # ============================================================
@@ -861,7 +1147,8 @@ with tab1:
     for fig in [
         make_chart(df, 'sentiment_index', '情緒指數', height=chart_height, zero_line=True, hover_fmt='.2f'),
         make_chart(df, 'ad_ratio', '多空比（上漲/下跌）', height=chart_height, hover_fmt='.3f'),
-        make_dual_chart(df, 'up_count', '上漲家數', 'down_count', '下跌家數', height=chart_height, hover_fmt='.0f'),
+        make_chart(df, 'up_count', '上漲家數', height=chart_height, hover_fmt='.0f'),
+        make_chart(df, 'down_count', '下跌家數', height=chart_height, hover_fmt='.0f'),
         make_dual_chart(df, 'red_k_count', '紅K家數', 'black_k_count', '黑K家數', height=chart_height, hover_fmt='.0f'),
     ]:
         if fig:
@@ -892,7 +1179,7 @@ with tab3:
     c_val = df.copy()
     if 'total_trade_value' in c_val.columns:
         c_val['total_trade_value'] = pd.to_numeric(c_val['total_trade_value'], errors='coerce') / 1e8
-        for sfx in ['_ma5', '_p5', '_p10', '_p25', '_p50', '_p75', '_p90', '_p95',
+        for sfx in ['_ma5', '_p10', '_p25', '_p50', '_p75', '_p90',
                     '_iqr_upper', '_iqr_lower']:
             k = f'total_trade_value{sfx}'
             if k in c_val.columns:
@@ -959,8 +1246,7 @@ st.markdown('<div class="section-hdr">📋 歷史每日收盤指標表</div>',
             unsafe_allow_html=True)
 
 # 衍生欄位後綴（排除用）
-_BAND_SFXS = ('_ma5','_p5','_p10','_p25','_p50','_p75','_p90','_p95',
-               '_iqr_upper','_iqr_lower')
+_BAND_SFXS = ('_ma5','_p10','_p25','_p50','_p75','_p90','_iqr_upper','_iqr_lower')
 
 if _tbl.get('show_all_columns', False):
     # 全欄位模式：排除衍生統計帶欄位和 id
@@ -1017,7 +1303,7 @@ st.download_button(
 st.markdown(
     "<hr><p style='text-align:center; color:#bbb; font-size:0.70rem;'>"
     "歷史收盤指標 | 資料來源：富邦 API（盤中）+ 證交所/櫃買中心 OHLCV API（歷史回填）<br>"
-    "參考線：灰虛線=中位數，金點線=P5/P95，紅點虛線=IQR離群值邊界<br>"
+    "參考線：灰虛線=中位數，深藍點線=P10/P90，琥珀虛線=P25/P75，玫瑰紅=IQR離群值邊界<br>"
     "⚙ 字型/色板/高度等顯示設定請至「設定」頁面調整</p>",
     unsafe_allow_html=True
 )

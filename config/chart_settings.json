@@ -19,18 +19,22 @@
         "show_iqr_outlier": true
     },
     "palette": {
-        "primary": "#6366F1",
-        "positive": "#E07050",
-        "negative": "#4CAF8A",
-        "p5p95_color": "#CBD5E1",
+        "primary": "#DC2626",
+        "positive": "#FB923C",
+        "negative": "#4ADE80",
+        "p5p95_color": "#3D5A73",
         "sma_colors": [
             "#F59E0B",
             "#06B6D4",
             "#F97316"
         ],
-        "median_color": "#64748B",
+        "median_color": "#B8C4CE",
         "iqr_outlier_color": "#F43F5E",
-        "p25p75_color": "#94A3B8"
+        "p25p75_color": "#7B8FA2",
+        "bull_area": "rgba(251,146,60,0.25)",
+        "bear_area": "rgba(74,222,128,0.22)",
+        "bull_line": "#DC2626",
+        "bear_line": "#15803D"
     },
     "table": {
         "show_all_columns": false,
