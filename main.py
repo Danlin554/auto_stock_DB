@@ -488,19 +488,31 @@ def sdk_login(logger):
     _tmp_cert = None
     if cert_b64:
         import base64, tempfile
+        cert_bytes = base64.b64decode(cert_b64.strip())
+        if len(cert_bytes) == 0:
+            raise RuntimeError("FUBON_CERT_B64 解碼後為空，請確認環境變數是否正確設定")
         fd, cert_path = tempfile.mkstemp(suffix='.pfx')
         _tmp_cert = cert_path
         with os.fdopen(fd, 'wb') as f:
-            f.write(base64.b64decode(cert_b64))
-        logger.info("使用 FUBON_CERT_B64 環境變數憑證")
+            f.write(cert_bytes)
+        logger.info(f"使用 FUBON_CERT_B64 環境變數憑證（大小={len(cert_bytes)} bytes，帳號={_FUBON_ID}，密碼長度={len(_FUBON_CERT_PWD)}）")
     else:
         cert_path = win_to_wsl(_FUBON_CERT_PATH)
-        logger.info(f"使用本機憑證：{cert_path}")
+        logger.info(f"使用本機憑證：{cert_path}（帳號={_FUBON_ID}，密碼長度={len(_FUBON_CERT_PWD)}）")
 
     try:
         result = sdk.login(_FUBON_ID, _FUBON_PWD, cert_path, _FUBON_CERT_PWD)
         if not result.is_success:
-            raise RuntimeError(f"登入失敗：{result.message}")
+            msg = f"登入失敗：{result.message}"
+            err = str(result.message).lower()
+            if 'certificate' in err or 'key' in err:
+                msg += (
+                    "\n  → 可能原因：(1) FUBON_CERT_B64 有多餘空白或換行"
+                    "\n  → (2) 憑證已過期，請至富邦官網重新申請"
+                    "\n  → (3) FUBON_CERT_PWD 不正確"
+                    "\n  → (4) 雲端 OpenSSL 不支援憑證加密演算法（確認 Dockerfile 已啟用 legacy provider）"
+                )
+            raise RuntimeError(msg)
         logger.info(f"登入富邦 API 成功：帳號={[a.account for a in (result.data or [])]}")
     except Exception as e:
         logger.error(f"登入失敗：{e}")
@@ -728,6 +740,20 @@ def ensure_daily_stocks(conn, today_str, logger):
             logger.info(f"  {ds}: 非交易日，跳過")
             check_date -= timedelta(days=1)
             continue
+
+        # 資料不完整（< 1500 筆），等 60 秒後重試一次
+        if count < 1500:
+            logger.warning(f"  {ds}: 補同步只取得 {count} 檔（預期 1800+），60 秒後重試...")
+            time.sleep(60)
+            try:
+                count2 = sync_daily(conn, check_date, logger)
+                if count2 > count:
+                    logger.info(f"  {ds}: 重試後取得 {count2} 檔")
+                    count = count2
+                else:
+                    logger.warning(f"  {ds}: 重試後仍只有 {max(count, count2)} 檔，接受並繼續")
+            except Exception as e:
+                logger.warning(f"  {ds}: 重試失敗 → {e}，以原有 {count} 筆繼續")
 
         # 補抓成功，做檢核
         verify_daily_stocks(conn, check_date, logger)

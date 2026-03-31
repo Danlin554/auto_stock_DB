@@ -519,6 +519,19 @@ def sync_date(conn, dt, logger):
 
     margin = {**tse_margin, **otc_margin}
 
+    # 3.5 交叉驗證：若 TSE OHLCV 為空但 TSE 法人或融資融券有資料，判定為暫時性錯誤，重試
+    if not tse_ohlcv and (tse_inst or tse_margin):
+        logger.warning(f"[TSE OHLCV] 其他 TSE 端點有資料（法人 {len(tse_inst)} 檔，融資融券 {len(tse_margin)} 檔），判定為暫時性錯誤，30 秒後重試...")
+        for retry in range(1, 3):
+            time.sleep(30)
+            tse_ohlcv = fetch_tse_ohlcv(dt, logger)
+            if tse_ohlcv:
+                logger.info(f"[TSE OHLCV] 第 {retry} 次重試成功，取得 {len(tse_ohlcv)} 檔")
+                ohlcv = {**tse_ohlcv, **otc_ohlcv}
+                break
+        else:
+            logger.error(f"[TSE OHLCV] 重試 2 次後仍失敗，本次同步將缺少上市 OHLCV（約 1000+ 檔）")
+
     # 4. 合併寫入
     count = merge_and_write(conn, dt, ohlcv, institutional, margin, logger)
 

@@ -7,6 +7,12 @@ RUN ln -snf /usr/share/zoneinfo/Asia/Taipei /etc/localtime && \
     apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev curl unzip && \
     rm -rf /var/lib/apt/lists/*
 
+# 啟用 OpenSSL 3.0 legacy provider，支援舊式 PFX 憑證加密演算法 (pbeWithSHA1And40BitRC2-CBC)
+# 富邦憑證使用此演算法，OpenSSL 3.0 預設停用，需明確啟用
+RUN sed -i 's/^default = default_sect$/default = default_sect\nlegacy = legacy_sect/' /etc/ssl/openssl.cnf && \
+    sed -i 's/^# activate = 1/activate = 1/' /etc/ssl/openssl.cnf && \
+    printf '\n[legacy_sect]\nactivate = 1\n' >> /etc/ssl/openssl.cnf
+
 WORKDIR /app
 
 # 安裝 fubon_neo SDK（從官方下載 Linux 版）
