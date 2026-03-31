@@ -4,7 +4,7 @@ FB-Market 雲端排程服務
 
 排程：
     - main.py:             週一~五 08:50（盤中收集，跑到 13:35 自動結束）
-    - postmarket_sync.py:  週一~五 17:00（盤後個股資料，幾分鐘完成）
+    - postmarket_sync.py:  週一~五 21:00（盤後個股資料，幾分鐘完成）
 
 部署到 Zeabur 後持續運行，APScheduler 會在正確時間自動啟動腳本。
 """
@@ -138,10 +138,10 @@ def main():
         misfire_grace_time=300,  # 允許延遲 5 分鐘內仍執行
     )
 
-    # 盤後同步：週一~五 17:00
+    # 盤後同步：週一~五 21:00
     scheduler.add_job(
         job_postmarket,
-        CronTrigger(day_of_week='mon-fri', hour=17, minute=0, timezone='Asia/Taipei'),
+        CronTrigger(day_of_week='mon-fri', hour=21, minute=0, timezone='Asia/Taipei'),
         id='postmarket_sync',
         name='盤後個股資料同步',
         misfire_grace_time=300,
