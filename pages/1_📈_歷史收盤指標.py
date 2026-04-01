@@ -47,17 +47,17 @@ _BAND_OUTER   = float(_chart.get('band_alpha_outer', 0.08))
 _BAND_INNER   = float(_chart.get('band_alpha_inner', 0.18))
 _SHOW_BANDS   = bool(_chart.get('show_bands', True))
 _SHOW_MED     = bool(_chart.get('show_median', True))
-_SHOW_P5P95   = bool(_chart.get('show_p5_p95', True))
+_SHOW_P10P90   = bool(_chart.get('show_p10_p90', _chart.get('show_p5_p95', True)))
 _SHOW_IQR     = bool(_chart.get('show_iqr_outlier', True))
 
-_PRIMARY  = _pal.get('primary', '#4A90D9')
-_POS      = _pal.get('positive', '#E8756C')
-_NEG      = _pal.get('negative', '#5BAA8A')
-_SMA_COLS = _pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
-_MED_COL   = _pal.get('median_color', '#F97316')
-_IQR_COL   = _pal.get('iqr_outlier_color', '#EF4444')
-_P5P95_COL = _pal.get('p5p95_color', '#8B5CF6')
-_P25P75_COL = _pal.get('p25p75_color', '#F59E0B')
+_PRIMARY    = _pal.get('primary',          '#DC2626')
+_POS        = _pal.get('positive',         '#FB923C')
+_NEG        = _pal.get('negative',         '#4ADE80')
+_SMA_COLS   = _pal.get('sma_colors',       ['#F59E0B', '#06B6D4', '#F97316'])
+_MED_COL    = _pal.get('median_color',     '#B8C4CE')
+_IQR_COL    = _pal.get('iqr_outlier_color','#F43F5E')
+_P10P90_COL = _pal.get('p10p90_color', _pal.get('p5p95_color', '#3D5A73'))
+_P25P75_COL = _pal.get('p25p75_color',    '#7B8FA2')
 _BULL_AREA   = _pal.get('bull_area',   'rgba(251,146,60,0.25)')
 _BEAR_AREA   = _pal.get('bear_area',   'rgba(74,222,128,0.22)')
 _BULL_LINE   = _pal.get('bull_line',   '#DC2626')
@@ -74,7 +74,7 @@ PLOTLY_CONFIG = {
 # display_cols / _DIAG_COLS / FULL_COL_LABELS，新增指標只改這裡。
 # 欄位說明：
 #   label              中文顯示名稱
-#   compute_band       是否計算 rolling 統計帶（P5~P95 / IQR）
+#   compute_band       是否計算 rolling 統計帶（P10~P90 / IQR）
 #   check_integrity    是否納入資料完整性診斷
 #   show_card          是否顯示統計摘要卡片（含百分位排名）
 #   higher_is_bullish  數值愈高代表偏多（百分位顏色依據）
@@ -260,7 +260,7 @@ def _load_raw_all():
 
 @st.cache_data(ttl=1800)
 def compute_bands(lookback: int):
-    """計算所有指標的 rolling 統計帶（5MA、P5~P95、IQR 離群值邊界）。"""
+    """計算所有指標的 rolling 統計帶（5MA、P10~P90、IQR 離群值邊界）。"""
     df = _load_raw_all()
     if df.empty:
         return df
@@ -356,12 +356,13 @@ def classify_zone(value, p10, p25, p50, p75, p90, higher_is_bullish=True):
 
 
 def _get_zone_for_row(row, col, higher_is_bullish=True):
-    """從 DataFrame 某行取得位階分類（使用 5MA 對比 rolling 統計帶）。"""
+    """從 DataFrame 某行取得位階分類（支援 Series/iterrows 和 namedtuple/itertuples）。"""
     def _g(k):
-        v = row.get(k) if hasattr(row, 'get') else None
-        if v is None:
-            try: v = row[k]
-            except (KeyError, TypeError): pass
+        # pandas Series 用 .get()；namedtuple 用 getattr
+        if hasattr(row, 'get'):
+            v = row.get(k)
+        else:
+            v = getattr(row, k, None)
         return float(v) if v is not None and not pd.isna(v) else float('nan')
     return classify_zone(
         _g(f'{col}_ma5'), _g(f'{col}_p10'), _g(f'{col}_p25'),
@@ -390,12 +391,12 @@ def _add_zone_triangles(fig, df_p, col, higher_is_bullish=True):
         'extreme_bear': ('triangle-down',        10),
     }
     xs, ys, colors, symbols, sizes, texts = [], [], [], [], [], []
-    for _, row in df_p.iterrows():
+    for row in df_p.itertuples(index=False):
         zk, zl, za, zc = _get_zone_for_row(row, col, higher_is_bullish)
         if zk is None:
             continue
         sym, sz = _sym_map[zk]
-        xs.append(row['date']); ys.append(tri_y)
+        xs.append(row.date); ys.append(tri_y)
         colors.append(zc); symbols.append(sym); sizes.append(sz)
         texts.append(f'{za} {zl}')
 
@@ -528,8 +529,8 @@ def make_chart(df_p, col, label, height=None, zero_line=False,
             ))
 
     # P90/P10 極端分位線
-    if _SHOW_P5P95:
-        pr, pg, pb = _hex_rgb(_P5P95_COL)
+    if _SHOW_P10P90:
+        pr, pg, pb = _hex_rgb(_P10P90_COL)
         for p_c, p_lbl in [(f'{col}_p90', 'P90'), (f'{col}_p10', 'P10')]:
             if p_c in df_p.columns:
                 fig.add_trace(go.Scatter(
@@ -790,7 +791,7 @@ def stat_card(col, label, higher_bullish, decimals, suffix, latest, df_all_col, 
                               f'padding:2px 7px; border-radius:12px; font-size:0.72rem; '
                               f'font-weight:700; margin-bottom:2px;">{za} {zl}</span><br>')
     except Exception:
-        pass
+        pass  # zone badge 計算失敗時靜默略過，不影響卡片其他內容
 
     # P25-P75 區間
     p25_val = latest.get(f'{col}_p25') if hasattr(latest, 'get') else None
@@ -910,6 +911,7 @@ if df.empty:
 latest      = df.iloc[-1]
 latest_date = latest['date']
 db_max_date = df_full['date'].max()
+_latest_full = df_full.iloc[-1]   # 資料庫最新一行（用於 Banner / stat_card）
 
 # ── 頁面標題 ──────────────────────────────────────────────────
 st.markdown(
@@ -944,12 +946,11 @@ else:
 _ov_zone_counts = {k: 0 for k in _ZONE_WEIGHTS}
 _ov_wsum = 0
 _ov_total = 0
-_latest_full_row = df_full.iloc[-1]
 
 for _ov_col, _ov_lbl_card, _ov_hib, _ov_dec, _ov_sfx, _ov_sgn in CARD_DEFS:
     if _ov_col not in df_full.columns:
         continue
-    _ovzk, _, _, _ = _get_zone_for_row(_latest_full_row, _ov_col, _ov_hib)
+    _ovzk, _, _, _ = _get_zone_for_row(_latest_full, _ov_col, _ov_hib)
     if _ovzk is not None:
         _ov_zone_counts[_ovzk] += 1
         _ov_wsum += _ZONE_WEIGHTS[_ovzk]
@@ -957,12 +958,12 @@ for _ov_col, _ov_lbl_card, _ov_hib, _ov_dec, _ov_sfx, _ov_sgn in CARD_DEFS:
 
 if _ov_total > 0:
     _ov_avg = _ov_wsum / _ov_total
-    if   _ov_avg > 1.5:  _overall_key = 'extreme_bull'
-    elif _ov_avg > 0.5:  _overall_key = 'bull'
-    elif _ov_avg > 0:    _overall_key = 'mild_bull'
-    elif _ov_avg > -0.5: _overall_key = 'mild_bear'
-    elif _ov_avg > -1.5: _overall_key = 'bear'
-    else:                _overall_key = 'extreme_bear'
+    if   _ov_avg > 1.5:   _overall_key = 'extreme_bull'
+    elif _ov_avg > 0.5:   _overall_key = 'bull'
+    elif _ov_avg >= 0:    _overall_key = 'mild_bull'
+    elif _ov_avg > -0.5:  _overall_key = 'mild_bear'
+    elif _ov_avg > -1.5:  _overall_key = 'bear'
+    else:                 _overall_key = 'extreme_bear'
 else:
     _overall_key = 'mild_bear'
 
@@ -970,10 +971,10 @@ _ov_lbl_banner, _ov_arrow, _ov_color = _ZONE_MAP[_overall_key]
 _ov_txt = '#064E3B' if _ov_color == '#D1FAE5' else ('#2c3e50' if _ov_color == '#FCD34D' else '#fff')
 
 try:
-    _banner_d = pd.to_datetime(latest_date)
+    _banner_d = pd.to_datetime(db_max_date)
     _banner_date_str = f"{_banner_d.year}/{_banner_d.month:02d}/{_banner_d.day:02d}（{_WD_MAP[_banner_d.weekday()]}）"
 except Exception:
-    _banner_date_str = str(latest_date)
+    _banner_date_str = str(db_max_date)
 
 _pill_defs = [
     ('extreme_bull', '極偏多', '#DC2626', '#fff'),
@@ -1017,8 +1018,6 @@ st.markdown('<div class="section-hdr">📊 今日數值 vs 歷史百分位</div>
             unsafe_allow_html=True)
 
 COLS_PER_ROW = 5
-# 使用含統計帶欄位的 df_full（compute_bands 結果）做百分位計算
-_latest_full = df_full.iloc[-1]
 
 for row_start in range(0, len(CARD_DEFS), COLS_PER_ROW):
     row_defs = CARD_DEFS[row_start:row_start + COLS_PER_ROW]
@@ -1074,13 +1073,14 @@ with st.expander("📅 歷史市場狀態總彙（各日各指標位階）", exp
         _hdr_html += f'<th style="{_th_style}">{_hlb}</th>'
     _hdr_html += f'<th style="{_th_style} font-weight:700;">整體</th>'
 
-    # 表格列
+    # 表格列（set_index 提升 .loc 查詢效能）
+    _hist_rows_idx = _hist_rows.set_index('date')
     _tbody_html = ''
     for _hdate in reversed(_hist_dates):
-        _hdf_row = _hist_rows[_hist_rows['date'] == _hdate]
-        if _hdf_row.empty:
+        if _hdate not in _hist_rows_idx.index:
             continue
-        _hrow = _hdf_row.iloc[0]
+        _hrow_raw = _hist_rows_idx.loc[_hdate]
+        _hrow = _hrow_raw.iloc[0] if isinstance(_hrow_raw, pd.DataFrame) else _hrow_raw
 
         try:
             _hd_obj = pd.to_datetime(_hdate)
@@ -1105,12 +1105,12 @@ with st.expander("📅 歷史市場狀態總彙（各日各指標位階）", exp
         # 整體欄
         if _row_total > 0:
             _r_avg = _row_wsum / _row_total
-            if   _r_avg > 1.5:  _rov = 'extreme_bull'
-            elif _r_avg > 0.5:  _rov = 'bull'
-            elif _r_avg > 0:    _rov = 'mild_bull'
-            elif _r_avg > -0.5: _rov = 'mild_bear'
-            elif _r_avg > -1.5: _rov = 'bear'
-            else:               _rov = 'extreme_bear'
+            if   _r_avg > 1.5:   _rov = 'extreme_bull'
+            elif _r_avg > 0.5:   _rov = 'bull'
+            elif _r_avg >= 0:    _rov = 'mild_bull'
+            elif _r_avg > -0.5:  _rov = 'mild_bear'
+            elif _r_avg > -1.5:  _rov = 'bear'
+            else:                _rov = 'extreme_bear'
             _rovl, _rova, _rovc = _ZONE_MAP[_rov]
             _rovtxt = '#064E3B' if _rovc == '#D1FAE5' else ('#2c3e50' if _rovc == '#FCD34D' else '#fff')
             _td_cells += (f'<td style="background:{_rovc}; color:{_rovtxt}; padding:3px 8px; '
@@ -1259,7 +1259,6 @@ else:
 tbl_cols = [c for c in display_cols if c in df.columns]
 
 # 欄位篩選器
-_with_labels = [(c, FULL_COL_LABELS.get(c, c)) for c in tbl_cols]
 _default_sel = tbl_cols[:min(15, len(tbl_cols))]
 sel_cols = st.multiselect(
     "選擇顯示欄位（可自訂）",
@@ -1282,7 +1281,7 @@ _fmt = {
     '強弱勢指數': '{:+.2f}%', '活躍度(%)': '{:.1f}%',
     '強百(%)': '{:+.2f}%', '弱百(%)': '{:+.2f}%',
     '站穩20MA%': '{:.1f}%', '站穩60MA%': '{:.1f}%',
-    '站穩5MA%': '{:.1f}%', '成交金額': '{:.0f}億',
+    '站穩5MA%': '{:.1f}%', '成交金額(億)': '{:.0f}億',
 }
 
 st.dataframe(

@@ -15,14 +15,14 @@
         "band_alpha_inner": 0.18,
         "show_bands": false,
         "show_median": true,
-        "show_p5_p95": true,
+        "show_p10_p90": true,
         "show_iqr_outlier": true
     },
     "palette": {
         "primary": "#DC2626",
         "positive": "#FB923C",
         "negative": "#4ADE80",
-        "p5p95_color": "#3D5A73",
+        "p10p90_color": "#3D5A73",
         "sma_colors": [
             "#F59E0B",
             "#06B6D4",

@@ -57,8 +57,9 @@ with tab_params:
         show_median    = st.checkbox("顯示中位數虛線",
                                      value=bool(cfg['chart'].get('show_median', True)))
     with col2:
-        show_p5_p95    = st.checkbox("顯示 P5 / P95 極端參考線",
-                                     value=bool(cfg['chart'].get('show_p5_p95', True)))
+        show_p10_p90   = st.checkbox("顯示 P10 / P90 極端參考線",
+                                     value=bool(cfg['chart'].get('show_p10_p90',
+                                                cfg['chart'].get('show_p5_p95', True))))
         show_iqr       = st.checkbox("顯示 IQR 離群值邊界線（Q3+1.5×IQR / Q1-1.5×IQR）",
                                      value=bool(cfg['chart'].get('show_iqr_outlier', True)))
 
@@ -76,7 +77,7 @@ with tab_params:
         cfg['lookback'] = lookback
         cfg['chart']['show_bands'] = show_bands
         cfg['chart']['show_median'] = show_median
-        cfg['chart']['show_p5_p95'] = show_p5_p95
+        cfg['chart']['show_p10_p90'] = show_p10_p90
         cfg['chart']['show_iqr_outlier'] = show_iqr
         save_chart_settings(cfg)
         st.success("✅ 參數設定已儲存！請切換到「歷史收盤指標」頁面查看效果。")
@@ -86,7 +87,7 @@ with tab_params:
         cfg['lookback'] = defaults['lookback']
         cfg['chart']['show_bands'] = defaults['chart']['show_bands']
         cfg['chart']['show_median'] = defaults['chart']['show_median']
-        cfg['chart']['show_p5_p95'] = defaults['chart']['show_p5_p95']
+        cfg['chart']['show_p10_p90'] = defaults['chart']['show_p10_p90']
         cfg['chart']['show_iqr_outlier'] = defaults['chart']['show_iqr_outlier']
         save_chart_settings(cfg)
         st.success("✅ 參數設定已恢復預設值！")
@@ -139,12 +140,17 @@ with tab_display:
         negative_color  = st.color_picker("負向色（下跌/弱勢）",   pal.get('negative', '#4ADE80'))
         iqr_color       = st.color_picker("IQR 離群值線顏色",       pal.get('iqr_outlier_color', '#F43F5E'))
         p25p75_color    = st.color_picker("P25/P75 四分位線顏色",   pal.get('p25p75_color', '#7B8FA2'))
-        p5p95_color     = st.color_picker("P10/P90 極端線顏色",     pal.get('p5p95_color', '#3D5A73'))
+        p10p90_color    = st.color_picker("P10/P90 極端線顏色",
+                                          pal.get('p10p90_color', pal.get('p5p95_color', '#3D5A73')))
     with col3:
-        sma_colors = pal.get('sma_colors', ['#F5C26B', '#4A90D9', '#9B8EC4'])
-        sma_c5  = st.color_picker("均線結構：5MA 色",  sma_colors[0] if len(sma_colors) > 0 else '#F5C26B')
-        sma_c20 = st.color_picker("均線結構：20MA 色", sma_colors[1] if len(sma_colors) > 1 else '#4A90D9')
-        sma_c60 = st.color_picker("均線結構：60MA 色", sma_colors[2] if len(sma_colors) > 2 else '#9B8EC4')
+        sma_colors = pal.get('sma_colors', ['#F59E0B', '#06B6D4', '#F97316'])
+        sma_c5  = st.color_picker("均線結構：5MA 色",  sma_colors[0] if len(sma_colors) > 0 else '#F59E0B')
+        sma_c20 = st.color_picker("均線結構：20MA 色", sma_colors[1] if len(sma_colors) > 1 else '#06B6D4')
+        sma_c60 = st.color_picker("均線結構：60MA 色", sma_colors[2] if len(sma_colors) > 2 else '#F97316')
+        bull_line_color = st.color_picker("面積圖多方 5MA 線色",
+                                          pal.get('bull_line', '#DC2626'))
+        bear_line_color = st.color_picker("面積圖空方 5MA 線色",
+                                          pal.get('bear_line', '#15803D'))
 
     # 色板預覽
     st.markdown(f"""
@@ -156,11 +162,13 @@ with tab_display:
   <span style='background:{negative_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>負向</span>
   <span style='background:{median_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>中位數</span>
   <span style='background:{p25p75_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P25/P75</span>
-  <span style='background:{p5p95_color}; color:#333; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P5/P95</span>
+  <span style='background:{p10p90_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>P10/P90</span>
   <span style='background:{iqr_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>IQR</span>
   <span style='background:{sma_c5}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>5MA</span>
   <span style='background:{sma_c20}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>20MA</span>
   <span style='background:{sma_c60}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>60MA</span>
+  <span style='background:{bull_line_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>多方MA</span>
+  <span style='background:{bear_line_color}; color:#fff; padding:3px 10px; border-radius:4px; font-size:0.78rem;'>空方MA</span>
 </div>""", unsafe_allow_html=True)
 
     # ── 線條樣式 ─────────────────────────────────────────────
@@ -219,8 +227,10 @@ with tab_display:
         cfg['palette']['median_color'] = median_color
         cfg['palette']['iqr_outlier_color'] = iqr_color
         cfg['palette']['p25p75_color'] = p25p75_color
-        cfg['palette']['p5p95_color'] = p5p95_color
+        cfg['palette']['p10p90_color'] = p10p90_color
         cfg['palette']['sma_colors'] = [sma_c5, sma_c20, sma_c60]
+        cfg['palette']['bull_line'] = bull_line_color
+        cfg['palette']['bear_line'] = bear_line_color
         cfg['table']['show_all_columns'] = show_all_cols
         cfg['table']['height'] = tbl_height
         save_chart_settings(cfg)
