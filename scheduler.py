@@ -5,6 +5,7 @@ FB-Market 雲端排程服務
 排程：
     - main.py:             週一~五 08:50（盤中收集，跑到 13:35 自動結束）
     - postmarket_sync.py:  週一~五 21:00（盤後個股資料，幾分鐘完成）
+    - backfill_history.py: 緊接 postmarket_sync 後自動執行，回填缺漏的 daily_closing
 
 部署到 Zeabur 後持續運行，APScheduler 會在正確時間自動啟動腳本。
 """
@@ -110,12 +111,15 @@ def job_main():
 
 
 def job_postmarket():
-    """盤後個股資料同步"""
+    """盤後個股資料同步 + 自動回填 daily_closing"""
     today = datetime.now()
     if today.weekday() >= 5:
         logger.info("今天是週末，跳過 postmarket_sync.py")
         return
     run_script('postmarket_sync.py')
+    # postmarket_sync 寫入 daily_stocks 後，自動回填缺漏的 daily_closing
+    logger.info("開始回填 daily_closing（從 daily_stocks 計算）...")
+    run_script('backfill_history.py', args=['--stats-only', '--fill-rolling'])
 
 
 # ── 主程式 ────────────────────────────────────────────────────
